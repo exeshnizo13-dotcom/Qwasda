@@ -3,7 +3,7 @@ Qwasda — автоматичне визначення та перемиканн
 Виявляє, коли користувач друкує в неправильній розкладці (укр/англ),
 перемикає розкладку та виправляє набраний текст.
 
-Запуск: Qwasda.exe
+Запуск: Qwasda.exe  або  pythonw qwasda.py
 Вихід: правий клік на іконці в треї → "Вихід"
 """
 
@@ -31,7 +31,9 @@ kernel32 = ctypes.windll.kernel32
 
 WH_KEYBOARD_LL = 13
 WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
 WM_SYSKEYDOWN = 0x0104
+WM_SYSKEYUP = 0x0105
 
 VK_BACK = 0x08
 VK_TAB = 0x09
@@ -71,24 +73,60 @@ NAVIGATION_VKS = {
     VK_TAB, VK_ESCAPE, VK_BACK, VK_RETURN
 }
 
-# Мапування: українські → англійські (scan code → символ)
-UKR_TO_ENG = {
-    'й': 'q', 'ц': 'w', 'у': 'e', 'к': 'r', 'е': 't', 'н': 'y', 'г': 'u',
-    'ш': 'i', 'щ': 'o', 'з': 'p', 'х': '[', 'ї': ']', 'ф': 'a', 'і': 's',
-    'в': 'd', 'а': 'f', 'п': 'g', 'р': 'h', 'о': 'j', 'л': 'k', 'д': 'l',
-    'ж': ';', 'є': "'", 'я': 'z', 'ч': 'x', 'с': 'c', 'м': 'v', 'и': 'b',
-    'т': 'n', 'ь': 'm', 'б': ',', 'ю': '.', 'ґ': '\\',
-    'Й': 'Q', 'Ц': 'W', 'У': 'E', 'К': 'R', 'Е': 'T', 'Н': 'Y', 'Г': 'U',
-    'Ш': 'I', 'Щ': 'O', 'З': 'P', 'Х': '{', 'Ї': '}', 'Ф': 'A', 'І': 'S',
-    'В': 'D', 'А': 'F', 'П': 'G', 'Р': 'H', 'О': 'J', 'Л': 'K', 'Д': 'L',
-    'Ж': ':', 'Є': '"', 'Я': 'Z', 'Ч': 'X', 'С': 'C', 'М': 'V', 'И': 'B',
-    'Т': 'N', 'Ь': 'M', 'Б': '<', 'Ю': '>', 'Ґ': '|',
+# ═══════════════════════════════════════════════════════════════════════════════
+# МАПУВАННЯ SCAN CODE → СИМВОЛ
+# ═══════════════════════════════════════════════════════════════════════════════
+# Scan code — це фізична позиція клавіші, не залежить від розкладки.
+# Один і той же scan code дає різні символи в різних розкладках.
+
+# Англійська розкладка (QWERTY)
+SCAN_ENG = {
+    0x10: 'q', 0x11: 'w', 0x12: 'e', 0x13: 'r', 0x14: 't', 0x15: 'y',
+    0x16: 'u', 0x17: 'i', 0x18: 'o', 0x19: 'p', 0x1a: '[', 0x1b: ']',
+    0x1e: 'a', 0x1f: 's', 0x20: 'd', 0x21: 'f', 0x22: 'g', 0x23: 'h',
+    0x24: 'j', 0x25: 'k', 0x26: 'l', 0x27: ';', 0x28: "'", 0x29: '`',
+    0x2b: '\\',
+    0x2c: 'z', 0x2d: 'x', 0x2e: 'c', 0x2f: 'v', 0x30: 'b', 0x31: 'n',
+    0x32: 'm', 0x33: ',', 0x34: '.', 0x35: '/',
+    0x02: '1', 0x03: '2', 0x04: '3', 0x05: '4', 0x06: '5',
+    0x07: '6', 0x08: '7', 0x09: '8', 0x0a: '9', 0x0b: '0',
+    0x0c: '-', 0x0d: '=',
+    0x39: ' ',
+    # Верхній ряд з Shift
+    0x2a: '',  # LSHIFT (модифікатор)
 }
-ENG_TO_UKR = {v: k for k, v in UKR_TO_ENG.items()}
+
+# Українська розкладка (ЙЦУКЕН)
+SCAN_UKR = {
+    0x10: 'й', 0x11: 'ц', 0x12: 'у', 0x13: 'к', 0x14: 'е', 0x15: 'н',
+    0x16: 'г', 0x17: 'ш', 0x18: 'щ', 0x19: 'з', 0x1a: 'х', 0x1b: 'ї',
+    0x1e: 'ф', 0x1f: 'і', 0x20: 'в', 0x21: 'а', 0x22: 'п', 0x23: 'р',
+    0x24: 'о', 0x25: 'л', 0x26: 'д', 0x27: 'ж', 0x28: 'є', 0x29: 'ґ',
+    0x2b: '\\',
+    0x2c: 'я', 0x2d: 'ч', 0x2e: 'с', 0x2f: 'м', 0x30: 'и', 0x31: 'т',
+    0x32: 'ь', 0x33: 'б', 0x34: 'ю', 0x35: '.',
+    0x02: '1', 0x03: '2', 0x04: '3', 0x05: '4', 0x06: '5',
+    0x07: '6', 0x08: '7', 0x09: '8', 0x0a: '9', 0x0b: '0',
+    0x0c: '-', 0x0d: '=',
+    0x39: ' ',
+}
+
+# Мапування: англійський символ → український (ті самі клавіші)
+ENG_TO_UKR = {}
+for sc in SCAN_ENG:
+    if sc in SCAN_UKR and SCAN_ENG[sc] and SCAN_UKR[sc]:
+        ENG_TO_UKR[SCAN_ENG[sc]] = SCAN_UKR[sc]
+
+# Мапування: український символ → англійський
+UKR_TO_ENG = {v: k for k, v in ENG_TO_UKR.items()}
+
+# Нейтральні символи (однакові в обох розкладках)
 NEUTRAL = set('0123456789`-=[]\\;\',./~!@#$%^&*()_+{}|:"<>? \t\n\r')
 
 
-# ─── Налаштування Win32 API типів ──────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Win32 структури та типи
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class KBDLLHOOKSTRUCT(ctypes.Structure):
     _fields_ = [
@@ -110,12 +148,11 @@ user32.GetKeyboardLayout.argtypes = [ctypes.c_ulong]
 user32.ActivateKeyboardLayout.argtypes = [ctypes.c_void_p, ctypes.c_uint]
 user32.SendInput.restype = ctypes.c_uint
 user32.SendInput.argtypes = [ctypes.c_uint, ctypes.c_void_p, ctypes.c_int]
-user32.ToUnicodeEx.restype = ctypes.c_int
-user32.ToUnicodeEx.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p]
-user32.GetKeyboardState.argtypes = [ctypes.c_void_p]
 
 
-# ─── Функції ───────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Функції
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def get_foreground_layout():
     hwnd = user32.GetForegroundWindow()
@@ -128,17 +165,12 @@ def switch_layout(lang_id):
     user32.ActivateKeyboardLayout(ctypes.c_void_p(lang_id), 0)
 
 
-def vk_to_unicode(vk_code, scan_code):
-    state = ctypes.create_string_buffer(256)
-    user32.GetKeyboardState(ctypes.byref(state))
-    hwnd = user32.GetForegroundWindow()
-    thread_id = user32.GetWindowThreadProcessId(hwnd, None)
-    hkl = user32.GetKeyboardLayout(thread_id)
-    buf = ctypes.create_unicode_buffer(8)
-    result = user32.ToUnicodeEx(vk_code, scan_code, state, buf, 8, 0, hkl)
-    if result > 0:
-        return buf.value
-    return None
+def get_char_from_scan(scan_code, layout):
+    """Повертає символ за scan code та розкладкою."""
+    if layout == LANG_ENGLISH:
+        return SCAN_ENG.get(scan_code)
+    else:
+        return SCAN_UKR.get(scan_code)
 
 
 # ─── SendInput ─────────────────────────────────────────────────────────────────
@@ -211,6 +243,7 @@ hook_handle = None
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def convert_text(text):
+    """Конвертує текст між розкладками."""
     if not text or len(text.strip()) == 0:
         return None, None
     ukr_as_eng = sum(1 for ch in text if ch in UKR_TO_ENG)
@@ -224,6 +257,7 @@ def convert_text(text):
 
 
 def manual_convert():
+    """Ручне перемикання — подвійне натискання тригера."""
     global typed_buffer
     text = typed_buffer.strip()
     if not text:
@@ -251,73 +285,89 @@ def manual_convert():
 def keyboard_hook(nCode, wParam, lParam):
     global typed_buffer, last_correction_time, last_trigger_time
 
-    if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
-        kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-        vk = kb.vkCode
-        sc = kb.scanCode
+    # Обробляємо тільки keydown
+    if nCode < 0 or wParam not in (WM_KEYDOWN, WM_SYSKEYDOWN):
+        return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
-        # Ручне перемикання: подвійне натискання тригера
-        if vk == trigger_key and enabled:
+    kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+    vk = kb.vkCode
+    sc = kb.scanCode
+
+    # Ручне перемикання: подвійне натискання тригера
+    if vk == trigger_key and enabled:
+        now = time.time()
+        if now - last_trigger_time < 0.5:
+            last_trigger_time = 0
+            manual_convert()
+            return 1
+        else:
+            last_trigger_time = now
+        return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
+
+    if not enabled:
+        return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
+
+    # Модифікатори — пропускаємо
+    if vk in MODIFIER_VKS:
+        return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
+
+    # Навігація — очищаємо буфер
+    if vk in NAVIGATION_VKS:
+        if vk == VK_BACK and typed_buffer:
+            typed_buffer = typed_buffer[:-1]
+        elif vk != VK_BACK:
+            typed_buffer = ""
+        return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
+
+    # Визначаємо символи за scan code для ОБОХ розкладок
+    layout = get_foreground_layout()
+    char_current = get_char_from_scan(sc, layout)  # Що набрано в поточній розкладці
+    char_other = get_char_from_scan(sc, LANG_UKRAINIAN if layout == LANG_ENGLISH else LANG_ENGLISH)  # Що було б в іншій
+
+    if char_current is None:
+        return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
+
+    # Оновлюємо буфер (символ з поточної розкладки)
+    if char_current not in NEUTRAL:
+        typed_buffer += char_current
+        if len(typed_buffer) > 200:
+            typed_buffer = typed_buffer[-100:]
+    elif char_current == ' ':
+        typed_buffer += ' '
+
+    # Автоматичне виправлення:
+    # Якщо в іншій розкладці на цій клавіші — українська літера (не нейтральна),
+    # а поточна розкладка — англійська, значить користувач помилився.
+    # І навпаки: якщо в іншій розкладці — англійська літера, а поточна — українська.
+    if char_current not in NEUTRAL and char_other and char_other not in NEUTRAL and char_other != char_current:
+        needs_fix = False
+        corrected = None
+        target_layout = None
+
+        if layout == LANG_ENGLISH and char_other in UKR_TO_ENG:
+            # В англ. розкладці, але на цій клавіші в укр. розкладці — укр. літера
+            needs_fix = True
+            corrected = char_other
+            target_layout = LANG_UKRAINIAN
+        elif layout == LANG_UKRAINIAN and char_other in ENG_TO_UKR:
+            # В укр. розкладці, але на цій клавіші в англ. розкладці — англ. літера
+            needs_fix = True
+            corrected = char_other
+            target_layout = LANG_ENGLISH
+
+        if needs_fix:
             now = time.time()
-            if now - last_trigger_time < 0.4:
-                last_trigger_time = 0
-                manual_convert()
-                return 1
-            else:
-                last_trigger_time = now
-            return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
-
-        if not enabled:
-            return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
-
-        if vk in MODIFIER_VKS:
-            return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
-
-        if vk in NAVIGATION_VKS:
-            if vk == VK_BACK and typed_buffer:
-                typed_buffer = typed_buffer[:-1]
-            elif vk != VK_BACK:
-                typed_buffer = ""
-            return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
-
-        char = vk_to_unicode(vk, sc)
-
-        if char and len(char) == 1:
-            if char not in NEUTRAL:
-                typed_buffer += char
-                if len(typed_buffer) > 200:
-                    typed_buffer = typed_buffer[-100:]
-            elif char == ' ':
-                typed_buffer += ' '
-
-            if char not in NEUTRAL:
-                layout = get_foreground_layout()
-                needs_fix = False
-                corrected = None
-                target_layout = None
-
-                if layout == LANG_ENGLISH and char in UKR_TO_ENG:
-                    needs_fix = True
-                    corrected = UKR_TO_ENG[char]
-                    target_layout = LANG_UKRAINIAN
-                elif layout == LANG_UKRAINIAN and char in ENG_TO_UKR:
-                    needs_fix = True
-                    corrected = ENG_TO_UKR[char]
-                    target_layout = LANG_ENGLISH
-
-                if needs_fix:
-                    now = time.time()
-                    if now - last_correction_time < 0.3:
-                        return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
-                    send_key(VK_BACK)
-                    time.sleep(0.01)
-                    switch_layout(target_layout)
-                    time.sleep(0.01)
-                    send_unicode_char(corrected)
-                    if typed_buffer:
-                        typed_buffer = typed_buffer[:-1] + corrected
-                    last_correction_time = now
-                    return 1
+            if now - last_correction_time < 0.3:
+                return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
+            send_key(VK_BACK)
+            time.sleep(0.01)
+            switch_layout(target_layout)
+            time.sleep(0.01)
+            send_unicode_char(corrected)
+            if typed_buffer:
+                typed_buffer = typed_buffer[:-1] + corrected
+            last_correction_time = now
+            return 1
 
     return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
@@ -447,14 +497,12 @@ def run_tray():
 def main():
     global running, hook_handle
 
-    # Встановлюємо low-level hook
     hinst = ctypes.pythonapi._handle
     hook_handle = user32.SetWindowsHookExW(WH_KEYBOARD_LL, keyboard_hook, hinst, 0)
 
     if not hook_handle:
         sys.exit(1)
 
-    # Запускаємо трей
     tray_thread = threading.Thread(target=run_tray, daemon=True)
     tray_thread.start()
 
@@ -470,7 +518,6 @@ def main():
 
     signal.signal(signal.SIGINT, handler)
 
-    # Message loop
     msg = ctypes.wintypes.MSG()
     while running:
         result = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
