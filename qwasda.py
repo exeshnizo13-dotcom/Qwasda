@@ -4,17 +4,17 @@ Qwasda — автоматичне визначення та перемиканн
 перемикає розкладку та виправляє набраний текст.
 
 Запуск: python qwasda.py
-Вихід: Ctrl+C або закриття вікна
-
-ВАЖЛИВО: Потрібно запускати від імені адміністратора!
+Вихід: правий клік на іконці в треї → "Вихід"
 """
 
 import sys
+import os
 import time
 import ctypes
 import ctypes.wintypes
 import atexit
 import signal
+import threading
 
 try:
     import keyboard
@@ -22,6 +22,15 @@ except ImportError:
     print("Помилка: бібліотека 'keyboard' не встановлена.")
     print("Запустіть: pip install keyboard")
     sys.exit(1)
+
+try:
+    import pystray
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:
+    print("Помилка: бібліотеки 'pystray' та 'pillow' не встановлені.")
+    print("Запустіть: pip install pystray pillow")
+    sys.exit(1)
+
 
 # ─── Константи ─────────────────────────────────────────────────────────────────
 
@@ -61,10 +70,7 @@ NAVIGATION_KEYS = {
     VK_TAB, VK_ESCAPE, VK_BACK, VK_RETURN
 }
 
-# ─── Мапування символів між розкладками ────────────────────────────────────────
-
-# Коли розкладка англійська, але користувач набирає "українські" літери
-# (тобто натискає клавіші, де у укр. розкладці стоять укр. літери)
+# Мапування символів між розкладками
 UKR_TO_ENG = {
     'й': 'q', 'ц': 'w', 'у': 'e', 'к': 'r', 'е': 't', 'н': 'y', 'г': 'u',
     'ш': 'i', 'щ': 'o', 'з': 'p', 'х': '[', 'ї': ']', 'ф': 'a', 'і': 's',
@@ -79,10 +85,7 @@ UKR_TO_ENG = {
     'ґ': '\\', 'Ґ': '|',
 }
 
-# Зворотне мапування
 ENG_TO_UKR = {v: k for k, v in UKR_TO_ENG.items()}
-
-# Нейтральні символи (не залежать від розкладки)
 NEUTRAL = set('0123456789`-=[]\\;\',./~!@#$%^&*()_+{}|:"<>? \t\n\r')
 
 # ─── Win32 API ─────────────────────────────────────────────────────────────────
@@ -104,7 +107,7 @@ def switch_layout(lang_id):
     user32.ActivateKeyboardLayout(ctypes.c_void_p(lang_id), 0)
 
 
-# ─── SendInput для надсилання клавіш ───────────────────────────────────────────
+# ─── SendInput ─────────────────────────────────────────────────────────────────
 
 class KEYBDINPUT(ctypes.Structure):
     _fields_ = [
@@ -115,10 +118,8 @@ class KEYBDINPUT(ctypes.Structure):
         ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
     ]
 
-
 class INPUT_UNION(ctypes.Union):
     _fields_ = [("ki", KEYBDINPUT)]
-
 
 class INPUT(ctypes.Structure):
     _fields_ = [("type", ctypes.c_ulong), ("union", INPUT_UNION)]
@@ -131,7 +132,6 @@ def _send_inputs(*inputs):
 
 
 def send_key(vk):
-    """Надсилає натискання клавіші з заданим VK-кодом."""
     down = INPUT()
     down.type = 1
     down.union.ki.wVk = vk
@@ -141,22 +141,21 @@ def send_key(vk):
     up.type = 1
     up.union.ki.wVk = vk
     up.union.ki.wScan = 0
-    up.union.ki.dwFlags = 2  # KEYEVENTF_KEYUP
+    up.union.ki.dwFlags = 2
     _send_inputs(down, up)
 
 
 def send_unicode_char(char):
-    """Надсилає Unicode-символ."""
     down = INPUT()
     down.type = 1
     down.union.ki.wVk = 0
     down.union.ki.wScan = ord(char)
-    down.union.ki.dwFlags = 0x0004  # KEYEVENTF_UNICODE
+    down.union.ki.dwFlags = 0x0004
     up = INPUT()
     up.type = 1
     up.union.ki.wVk = 0
     up.union.ki.wScan = ord(char)
-    up.union.ki.dwFlags = 0x0006  # KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+    up.union.ki.dwFlags = 0x0006
     _send_inputs(down, up)
 
 
@@ -164,45 +163,37 @@ def send_unicode_char(char):
 
 running = True
 last_correction_time = 0
+enabled = True
 
 
 # ─── Обробник клавіатури ──────────────────────────────────────────────────────
 
 def on_key_event(event):
-    """Обробник події натискання клавіші."""
     global last_correction_time
 
-    # Працюємо тільки з key_down подіями
+    if not enabled:
+        return
     if event.event_type != keyboard.KEY_DOWN:
         return
 
     vk = event.scan_code
-
-    # Ігноруємо модифікатори та навігацію
     if vk in MODIFIER_KEYS or vk in NAVIGATION_KEYS:
         return
 
-    # Отримуємо символ
     char = event.name
-
-    # Фільтруємо: тільки однолітерні символи, не нейтральні
     if not char or len(char) != 1 or char in NEUTRAL:
         return
 
     layout = get_foreground_layout()
-
     needs_fix = False
     corrected = None
     target_layout = None
 
     if layout == LANG_ENGLISH and char in UKR_TO_ENG:
-        # Англійська розкладка, але набрали символ, який є тільки в укр. розкладці
         needs_fix = True
         corrected = UKR_TO_ENG[char]
         target_layout = LANG_UKRAINIAN
-
     elif layout == LANG_UKRAINIAN and char in ENG_TO_UKR:
-        # Українська розкладка, але набрали символ, який є тільки в англ. розкладці
         needs_fix = True
         corrected = ENG_TO_UKR[char]
         target_layout = LANG_ENGLISH
@@ -211,19 +202,122 @@ def on_key_event(event):
         now = time.time()
         if now - last_correction_time < 0.3:
             return
-
-        # 1. Backspace — видаляємо помилковий символ
         send_key(VK_BACK)
         time.sleep(0.01)
-
-        # 2. Перемикаємо розкладку
         switch_layout(target_layout)
         time.sleep(0.01)
-
-        # 3. Надсилаємо виправлений символ
         send_unicode_char(corrected)
-
         last_correction_time = now
+
+
+# ─── Автозапуск ────────────────────────────────────────────────────────────────
+
+def _get_startup_folder():
+    """Повертає шлях до папки автозапуску."""
+    return os.path.join(
+        os.environ.get("APPDATA", ""),
+        r"Microsoft\Windows\Start Menu\Programs\Startup"
+    )
+
+
+def _get_bat_path():
+    return os.path.join(_get_startup_folder(), "Qwasda.bat")
+
+
+def add_to_startup():
+    """Додає Qwasda до автозапуску Windows."""
+    startup_dir = _get_startup_folder()
+    os.makedirs(startup_dir, exist_ok=True)
+    bat_path = _get_bat_path()
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    python_exe = sys.executable
+    script_path = os.path.join(script_dir, "qwasda.py")
+
+    bat_content = f'@echo off\nstart "" "{python_exe}" "{script_path}"\n'
+    with open(bat_path, "w", encoding="utf-8") as f:
+        f.write(bat_content)
+    return bat_path
+
+
+def remove_from_startup():
+    """Видаляє Qwasda з автозапуску."""
+    bat_path = _get_bat_path()
+    if os.path.exists(bat_path):
+        os.remove(bat_path)
+        return True
+    return False
+
+
+def is_in_startup():
+    """Перевіряє, чи Qwasda є в автозапуску."""
+    return os.path.exists(_get_bat_path())
+
+
+# ─── Системний трей ────────────────────────────────────────────────────────────
+
+def _create_icon_image():
+    """Створює іконку для системного трею."""
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle([4, 4, 60, 60], radius=12, fill=(41, 128, 185))
+
+    try:
+        font = ImageFont.truetype("arial.ttf", 26)
+    except Exception:
+        font = ImageFont.load_default()
+
+    draw.text((10, 14), "Qw", fill="white", font=font)
+    return img
+
+
+def _toggle_enabled(icon, item):
+    global enabled
+    enabled = not enabled
+    icon.update_menu()
+
+
+def _toggle_startup(icon, item):
+    if is_in_startup():
+        remove_from_startup()
+    else:
+        add_to_startup()
+    icon.update_menu()
+
+
+def _on_exit(icon, item):
+    global running
+    running = False
+    keyboard.unhook_all()
+    icon.stop()
+
+
+def _make_menu():
+    return pystray.Menu(
+        pystray.MenuItem(
+            lambda item: "✅ Перемикання увімкнено" if enabled else "⏸ Перемикання вимкнено",
+            _toggle_enabled,
+            checked=lambda item: enabled,
+        ),
+        pystray.MenuItem(
+            lambda item: "✅ Автозапуск увімкнено" if is_in_startup() else "❌ Автозапуск вимкнено",
+            _toggle_startup,
+            checked=lambda item: is_in_startup(),
+        ),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Вихід", _on_exit),
+    )
+
+
+def run_tray():
+    """Запускає іконку в системному трею."""
+    icon = pystray.Icon(
+        "Qwasda",
+        _create_icon_image(),
+        "Qwasda — перемикання розкладки",
+        _make_menu(),
+    )
+    icon.run()
 
 
 # ─── Main ──────────────────────────────────────────────────────────────────────
@@ -232,39 +326,39 @@ def main():
     global running
 
     print("=" * 55)
-    print("  Layout Switcher 🇺🇦🇬🇧")
-    print("  Автоматичне виправлення розкладки клавіатури")
-    print("  Вихід: Ctrl+C")
+    print("  Qwasda")
+    print("  Automatic keyboard layout switcher (EN/UK)")
     print("=" * 55)
 
-    # Реєструємо глобальний хук
     keyboard.hook(on_key_event)
+    print("\n✅ Keyboard hook installed.")
 
-    print("\n✅ Хук встановлено. Працюємо...\n")
-    print("Підказка: спробуйте набрати 'ghbdtn' в англ. розкладці")
-    print("          — має стати 'привіт'\n")
+    if is_in_startup():
+        print("✅ Autostart enabled.")
+    else:
+        print("ℹ️  Autostart disabled. Enable via tray icon.")
 
-    # Очищення
-    def cleanup():
-        keyboard.unhook_all()
-        print("\nLayout Switcher зупинено.")
+    print("\nTip: type 'ghbdtn' in EN layout -> 'привіт'")
+    print("     Manage via the tray icon.\n")
 
-    atexit.register(cleanup)
+    tray_thread = threading.Thread(target=run_tray, daemon=True)
+    tray_thread.start()
+
+    atexit.register(lambda: keyboard.unhook_all())
 
     def handler(sig, frame):
         global running
         running = False
-        cleanup()
+        keyboard.unhook_all()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, handler)
 
-    # Тримаємо програму живою
     try:
         while running:
             time.sleep(0.1)
     except KeyboardInterrupt:
-        cleanup()
+        keyboard.unhook_all()
 
 
 if __name__ == "__main__":
