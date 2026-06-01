@@ -1,7 +1,6 @@
 """
 Qwasda — автоматичне визначення та перемикання розкладки клавіатури.
-Виявляє, коли користувач друкує в неправильній розкладці (укр/англ),
-перемикає розкладку та виправляє набраний текст.
+Працює як Punto Switcher: low-level Win32 hook + scan codes.
 
 Запуск: pythonw qwasda.py  (без консолі)
         або start.bat
@@ -13,39 +12,19 @@ import os
 import time
 import ctypes
 import ctypes.wintypes
+import ctypes.wintypes as wintypes
 import atexit
 import signal
 import threading
 
 # ─── Приховуємо консоль ───────────────────────────────────────────────────────
-# Якщо запущено через pythonw.exe — консолі немає.
-# Якщо запущено через python.exe — приховуємо вікно консолі.
-if sys.stdout is None or not sys.stdout.isatty():
-    # Вже запущено без консолі (pythonw)
-    pass
-else:
-    # Намагаємось приховати консоль
-    try:
-        ctypes.windll.user32.ShowWindow(
-            ctypes.windll.kernel32.GetConsoleWindow(), 0  # SW_HIDE = 0
-        )
-    except Exception:
-        pass
-
 try:
-    import keyboard
-except ImportError:
-    # Якщо консоль прихована — показуємо повідомлення
-    try:
-        ctypes.windll.user32.MessageBoxW(
-            0,
-            "Бібліотека 'keyboard' не встановлена.\nЗапустіть: pip install keyboard",
-            "Qwasda — Помилка",
-            0x10  # MB_ICONERROR
+    if sys.stdout is not None and sys.stdout.isatty():
+        ctypes.windll.user32.ShowWindow(
+            ctypes.windll.kernel32.GetConsoleWindow(), 0
         )
-    except Exception:
-        pass
-    sys.exit(1)
+except Exception:
+    pass
 
 try:
     import pystray
@@ -62,11 +41,17 @@ except ImportError:
         pass
     sys.exit(1)
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Win32 API — прямий хук, як у Punto Switcher
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# ─── Константи ─────────────────────────────────────────────────────────────────
+user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
 
-LANG_ENGLISH = 0x0409
-LANG_UKRAINIAN = 0x0422
+# Константи
+WH_KEYBOARD_LL = 13
+WM_KEYDOWN = 0x0100
+WM_SYSKEYDOWN = 0x0104
 
 VK_BACK = 0x08
 VK_TAB = 0x09
@@ -89,44 +74,80 @@ VK_LCONTROL = 0xA2
 VK_RCONTROL = 0xA3
 VK_LMENU = 0xA4
 VK_RMENU = 0xA5
+VK_OEM_3 = 0xC0  # ` (backtick/tilde) на US клавіатурі
+VK_OEM_7 = 0xDE  # ' (apostrophe/double-quote) на US клавіатурі
 
-MODIFIER_KEYS = {
+LANG_ENGLISH = 0x0409
+LANG_UKRAINIAN = 0x0422
+
+MODIFIER_VKS = {
     VK_SHIFT, VK_CONTROL, VK_MENU, VK_CAPITAL,
     VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL,
     VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN
 }
 
-NAVIGATION_KEYS = {
+NAVIGATION_VKS = {
     VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN,
     VK_TAB, VK_ESCAPE, VK_BACK, VK_RETURN
 }
 
-# Мапування символів між розкладками
+# Мапування: що набирають → що мали на увазі
+# Клавіші розкладки: йцукенгшщзхїфівапролджєячсмитьбюґ
+# Відповідні англійські: qwertyuiop[]asdfghjkl;'zxcvbnm,./
 UKR_TO_ENG = {
     'й': 'q', 'ц': 'w', 'у': 'e', 'к': 'r', 'е': 't', 'н': 'y', 'г': 'u',
     'ш': 'i', 'щ': 'o', 'з': 'p', 'х': '[', 'ї': ']', 'ф': 'a', 'і': 's',
     'в': 'd', 'а': 'f', 'п': 'g', 'р': 'h', 'о': 'j', 'л': 'k', 'д': 'l',
     'ж': ';', 'є': "'", 'я': 'z', 'ч': 'x', 'с': 'c', 'м': 'v', 'и': 'b',
-    'т': 'n', 'ь': 'm', 'б': ',', 'ю': '.',
+    'т': 'n', 'ь': 'm', 'б': ',', 'ю': '.', 'ґ': '\\',
     'Й': 'Q', 'Ц': 'W', 'У': 'E', 'К': 'R', 'Е': 'T', 'Н': 'Y', 'Г': 'U',
     'Ш': 'I', 'Щ': 'O', 'З': 'P', 'Х': '{', 'Ї': '}', 'Ф': 'A', 'І': 'S',
     'В': 'D', 'А': 'F', 'П': 'G', 'Р': 'H', 'О': 'J', 'Л': 'K', 'Д': 'L',
     'Ж': ':', 'Є': '"', 'Я': 'Z', 'Ч': 'X', 'С': 'C', 'М': 'V', 'И': 'B',
-    'Т': 'N', 'Ь': 'M', 'Б': '<', 'Ю': '>',
-    'ґ': '\\', 'Ґ': '|',
+    'Т': 'N', 'Ь': 'M', 'Б': '<', 'Ю': '>', 'Ґ': '|',
 }
 
 ENG_TO_UKR = {v: k for k, v in UKR_TO_ENG.items()}
 NEUTRAL = set('0123456789`-=[]\\;\',./~!@#$%^&*()_+{}|:"<>? \t\n\r')
 
-# ─── Win32 API ─────────────────────────────────────────────────────────────────
 
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
+# ─── Структури Win32 ───────────────────────────────────────────────────────────
 
+class KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("vkCode", wintypes.DWORD),
+        ("scanCode", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    ]
+
+
+# Налаштування типів для Win32 API
+user32.SetWindowsHookExW.restype = ctypes.c_void_p
+user32.SetWindowsHookExW.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong]
+user32.CallNextHookEx.restype = ctypes.c_long
+user32.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM]
+user32.UnhookWindowsHookEx.restype = ctypes.c_bool
+user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+user32.GetKeyboardLayout.restype = ctypes.c_void_p
+user32.GetKeyboardLayout.argtypes = [ctypes.c_ulong]
+user32.ActivateKeyboardLayout.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+user32.SendInput.restype = ctypes.c_uint
+user32.SendInput.argtypes = [ctypes.c_uint, ctypes.c_void_p, ctypes.c_int]
+user32.ToUnicodeEx.restype = ctypes.c_int
+user32.ToUnicodeEx.argtypes = [
+    ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p,
+    ctypes.c_void_p, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p
+]
+user32.GetKeyboardState.argtypes = [ctypes.c_void_p]
+user32.MapVirtualKeyW.restype = ctypes.c_uint
+user32.MapVirtualKeyW.argtypes = [ctypes.c_uint, ctypes.c_uint]
+
+
+# ─── Функції Win32 ─────────────────────────────────────────────────────────────
 
 def get_foreground_layout():
-    """Повертає LANGID поточної розкладки активного вікна."""
     hwnd = user32.GetForegroundWindow()
     thread_id = user32.GetWindowThreadProcessId(hwnd, None)
     hkl = user32.GetKeyboardLayout(thread_id)
@@ -134,8 +155,23 @@ def get_foreground_layout():
 
 
 def switch_layout(lang_id):
-    """Перемикає розкладку клавіатури."""
     user32.ActivateKeyboardLayout(ctypes.c_void_p(lang_id), 0)
+
+
+def vk_to_unicode(vk_code, scan_code):
+    """Конвертує VK code в Unicode символ з поточної розкладки."""
+    state = ctypes.create_string_buffer(256)
+    user32.GetKeyboardState(ctypes.byref(state))
+
+    hwnd = user32.GetForegroundWindow()
+    thread_id = user32.GetWindowThreadProcessId(hwnd, None)
+    hkl = user32.GetKeyboardLayout(thread_id)
+
+    buf = ctypes.create_unicode_buffer(8)
+    result = user32.ToUnicodeEx(vk_code, scan_code, state, buf, 8, 0, hkl)
+    if result > 0:
+        return buf.value
+    return None
 
 
 # ─── SendInput ─────────────────────────────────────────────────────────────────
@@ -190,245 +226,213 @@ def send_unicode_char(char):
     _send_inputs(down, up)
 
 
-# ─── Налаштування ──────────────────────────────────────────────────────────────
-
-# Клавіша для ручного перемикання (подвійне натискання)
-MANUAL_TRIGGER_KEY = '`'  # backtick (код 223 на клавіатурі)
-# Альтернативна клавіша: "'" (апостроф)
-
-# Чутливість подвійного натискання (секунди)
-DOUBLE_PRESS_INTERVAL = 0.4
-
-
-# ─── Стан ──────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Глобальний стан
+# ═══════════════════════════════════════════════════════════════════════════════
 
 running = True
-last_correction_time = 0
 enabled = True
-last_trigger_press_time = 0  # Час останнього натискання тригера
-typed_buffer = ""  # Буфер набраних символів
+typed_buffer = ""
+last_correction_time = 0
+last_trigger_time = 0
+trigger_key = VK_OEM_3  # ` (backtick) за замовчуванням
+hook_handle = None
 
 
-# ─── Функція конвертації тексту ────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Логіка конвертації
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def convert_text(text):
-    """Конвертує текст з однієї розкладки в іншу.
-    Повертає (converted_text, target_layout).
-    Якщо конвертація не потрібна — повертає (None, None).
-    """
-    if not text:
+    """Конвертує текст між розкладками. Повертає (converted, target_layout)."""
+    if not text or len(text.strip()) == 0:
         return None, None
 
-    # Визначаємо, яка розкладка була "задумана" за набраним текстом
-    # Якщо текст містить українські літери в англійській розкладці — конвертуємо в укр
-    # Якщо текст містить англійські літери в українській розкладці — конвертуємо в англ
-
-    has_ukr_as_eng = False
-    has_eng_as_ukr = False
+    ukr_as_eng = 0
+    eng_as_ukr = 0
 
     for ch in text:
         if ch in UKR_TO_ENG:
-            has_ukr_as_eng = True
+            ukr_as_eng += 1
         if ch in ENG_TO_UKR:
-            has_eng_as_ukr = True
+            eng_as_ukr += 1
 
-    converted = None
-    target_layout = None
+    if ukr_as_eng == 0 and eng_as_ukr == 0:
+        return None, None
 
-    if has_ukr_as_eng and not has_eng_as_ukr:
-        # Набрано "українські" літери в англійській розкладці
+    if ukr_as_eng >= eng_as_ukr:
+        # Конвертуємо "українське" в англійську розкладку
         converted = "".join(UKR_TO_ENG.get(ch, ch) for ch in text)
-        target_layout = LANG_UKRAINIAN
-    elif has_eng_as_ukr and not has_ukr_as_eng:
-        # Набрано "англійські" літери в українській розкладці
+        return converted, LANG_UKRAINIAN
+    else:
         converted = "".join(ENG_TO_UKR.get(ch, ch) for ch in text)
-        target_layout = LANG_ENGLISH
-    elif has_ukr_as_eng and has_eng_as_ukr:
-        # Змішаний текст — визначаємо за більшістю
-        ukr_count = sum(1 for ch in text if ch in UKR_TO_ENG)
-        eng_count = sum(1 for ch in text if ch in ENG_TO_UKR)
-        if ukr_count >= eng_count:
-            converted = "".join(UKR_TO_ENG.get(ch, ch) for ch in text)
-            target_layout = LANG_UKRAINIAN
-        else:
-            converted = "".join(ENG_TO_UKR.get(ch, ch) for ch in text)
-            target_layout = LANG_ENGLISH
+        return converted, LANG_ENGLISH
 
-    return converted, target_layout
-
-
-# ─── Ручне перемикання з виправленням ──────────────────────────────────────────
 
 def manual_convert():
-    """Викликається при подвійному натисканні тригера.
-    Копіює виділений текст (або весь текст у полі введення),
-    конвертує його і вставляє назад.
-    """
+    """Ручне перемикання — видаляє буфер і вводить конвертований текст."""
     global typed_buffer
 
-    # Використовуємо буфер набраних символів
-    text_to_convert = typed_buffer
-    if not text_to_convert:
+    text = typed_buffer.strip()
+    if not text:
         return
 
-    converted, target_layout = convert_text(text_to_convert)
-    if not converted or converted == text_to_convert:
+    converted, target_layout = convert_text(text)
+    if not converted or converted == text:
         return
 
-    # 1. Видаляємо набраний текст (по одному символу)
-    for _ in range(len(text_to_convert)):
+    # Видаляємо набране
+    for _ in range(len(text)):
         send_key(VK_BACK)
         time.sleep(0.005)
-
     time.sleep(0.02)
 
-    # 2. Перемикаємо розкладку
+    # Перемикаємо розкладку
     switch_layout(target_layout)
     time.sleep(0.02)
 
-    # 3. Вводимо конвертований текст
+    # Вводимо конвертоване
     for ch in converted:
         send_unicode_char(ch)
         time.sleep(0.005)
 
-    # Очищаємо буфер
     typed_buffer = ""
 
 
-# ─── Обробник клавіатури ──────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Low-level keyboard hook — ЯК У PUNTO SWITCHER
+# ═══════════════════════════════════════════════════════════════════════════════
 
-def on_key_event(event):
-    global last_correction_time, last_trigger_press_time, typed_buffer
+@ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM)
+def keyboard_hook(nCode, wParam, lParam):
+    global typed_buffer, last_correction_time, last_trigger_time
 
-    if not enabled:
-        return
-    if event.event_type != keyboard.KEY_DOWN:
-        return
+    if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+        kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+        vk = kb.vkCode
+        sc = kb.scanCode
 
-    vk = event.scan_code
-    char = event.name
+        # ── Ручне перемикання: подвійне натискання тригера ──
+        if vk == trigger_key and enabled:
+            now = time.time()
+            if now - last_trigger_time < 0.4:
+                last_trigger_time = 0
+                manual_convert()
+                return 1
+            else:
+                last_trigger_time = now
+            return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
-    # ── Перевірка на подвійне натискання тригера ──
-    if char == MANUAL_TRIGGER_KEY:
-        now = time.time()
-        if now - last_trigger_press_time < DOUBLE_PRESS_INTERVAL:
-            # Подвійне натискання! Конвертуємо текст
-            last_trigger_press_time = 0  # Скидаємо, щоб не спрацьовувало 3+ разів
-            manual_convert()
-            return  # Блокуємо саму клавішу
-        else:
-            last_trigger_press_time = now
-            # Не блокуємо — даємо клавіші пройти далі
-            return
+        if not enabled:
+            return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
-    if vk in MODIFIER_KEYS or vk in NAVIGATION_KEYS:
-        # Очищаємо буфер при навігації
-        if vk == VK_BACK and typed_buffer:
-            typed_buffer = typed_buffer[:-1]
-        elif vk in (VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_TAB, VK_RETURN):
-            typed_buffer = ""
-        return
+        # Ігноруємо модифікатори
+        if vk in MODIFIER_VKS:
+            return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
-    # Оновлюємо буфер набраних символів
-    if char and len(char) == 1 and char not in NEUTRAL:
-        typed_buffer += char
-        if len(typed_buffer) > 200:
-            typed_buffer = typed_buffer[-100:]
-    elif char == 'space':
-        typed_buffer += ' '
-    elif vk == VK_BACK and typed_buffer:
-        typed_buffer = typed_buffer[:-1]
+        # Навігація — очищаємо буфер
+        if vk in NAVIGATION_VKS:
+            if vk == VK_BACK and typed_buffer:
+                typed_buffer = typed_buffer[:-1]
+            elif vk != VK_BACK:
+                typed_buffer = ""
+            return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
-    # ── Автоматичне виправлення ──
-    if not char or len(char) != 1 or char in NEUTRAL:
-        return
+        # Отримуємо символ
+        char = vk_to_unicode(vk, sc)
 
-    layout = get_foreground_layout()
-    needs_fix = False
-    corrected = None
-    target_layout = None
+        if char and len(char) == 1:
+            # Оновлюємо буфер
+            if char not in NEUTRAL:
+                typed_buffer += char
+                if len(typed_buffer) > 200:
+                    typed_buffer = typed_buffer[-100:]
+            elif char == ' ':
+                typed_buffer += ' '
 
-    if layout == LANG_ENGLISH and char in UKR_TO_ENG:
-        needs_fix = True
-        corrected = UKR_TO_ENG[char]
-        target_layout = LANG_UKRAINIAN
-    elif layout == LANG_UKRAINIAN and char in ENG_TO_UKR:
-        needs_fix = True
-        corrected = ENG_TO_UKR[char]
-        target_layout = LANG_ENGLISH
+            # ── Автоматичне виправлення ──
+            if char not in NEUTRAL:
+                layout = get_foreground_layout()
+                needs_fix = False
+                corrected = None
+                target_layout = None
 
-    if needs_fix:
-        now = time.time()
-        if now - last_correction_time < 0.3:
-            return
-        send_key(VK_BACK)
-        time.sleep(0.01)
-        switch_layout(target_layout)
-        time.sleep(0.01)
-        send_unicode_char(corrected)
-        # Оновлюємо буфер: замість символу додаємо виправлений
-        if typed_buffer:
-            typed_buffer = typed_buffer[:-1] + corrected
-        last_correction_time = now
+                if layout == LANG_ENGLISH and char in UKR_TO_ENG:
+                    needs_fix = True
+                    corrected = UKR_TO_ENG[char]
+                    target_layout = LANG_UKRAINIAN
+                elif layout == LANG_UKRAINIAN and char in ENG_TO_UKR:
+                    needs_fix = True
+                    corrected = ENG_TO_UKR[char]
+                    target_layout = LANG_ENGLISH
+
+                if needs_fix:
+                    now = time.time()
+                    if now - last_correction_time < 0.3:
+                        return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
+
+                    send_key(VK_BACK)
+                    time.sleep(0.01)
+                    switch_layout(target_layout)
+                    time.sleep(0.01)
+                    send_unicode_char(corrected)
+
+                    if typed_buffer:
+                        typed_buffer = typed_buffer[:-1] + corrected
+                    last_correction_time = now
+                    return 1
+
+    return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
 
-# ─── Автозапуск ────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Автозапуск
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _get_startup_folder():
-    """Повертає шлях до папки автозапуску."""
     return os.path.join(
         os.environ.get("APPDATA", ""),
         r"Microsoft\Windows\Start Menu\Programs\Startup"
     )
 
-
 def _get_bat_path():
     return os.path.join(_get_startup_folder(), "Qwasda.bat")
 
-
 def add_to_startup():
-    """Додає Qwasda до автозапуску Windows."""
     startup_dir = _get_startup_folder()
     os.makedirs(startup_dir, exist_ok=True)
-    bat_path = _get_bat_path()
-
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    python_exe = sys.executable
+    pythonw_exe = sys.executable.replace("python.exe", "pythonw.exe")
+    if pythonw_exe == sys.executable:
+        pythonw_exe = sys.executable  # вже pythonw
     script_path = os.path.join(script_dir, "qwasda.py")
-
-    bat_content = f'@echo off\nstart "" "{python_exe}" "{script_path}"\n'
-    with open(bat_path, "w", encoding="utf-8") as f:
+    bat_content = f'@echo off\nstart "" "{pythonw_exe}" "{script_path}"\n'
+    with open(_get_bat_path(), "w", encoding="utf-8") as f:
         f.write(bat_content)
-    return bat_path
-
 
 def remove_from_startup():
-    """Видаляє Qwasda з автозапуску."""
     bat_path = _get_bat_path()
     if os.path.exists(bat_path):
         os.remove(bat_path)
         return True
     return False
 
-
 def is_in_startup():
-    """Перевіряє, чи Qwasda є в автозапуску."""
     return os.path.exists(_get_bat_path())
 
 
-# ─── Системний трей ────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Системний трей
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _create_icon_image():
-    """Створює іконку для системного трею."""
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     draw.rounded_rectangle([4, 4, 60, 60], radius=12, fill=(41, 128, 185))
-
     try:
         font = ImageFont.truetype("arial.ttf", 26)
     except Exception:
         font = ImageFont.load_default()
-
     draw.text((10, 14), "Qw", fill="white", font=font)
     return img
 
@@ -436,6 +440,15 @@ def _create_icon_image():
 def _toggle_enabled(icon, item):
     global enabled
     enabled = not enabled
+    icon.update_menu()
+
+
+def _toggle_trigger(icon, item):
+    global trigger_key
+    if trigger_key == VK_OEM_3:
+        trigger_key = VK_OEM_7  # Перемикаємо на '
+    else:
+        trigger_key = VK_OEM_3  # Перемикаємо на `
     icon.update_menu()
 
 
@@ -448,32 +461,28 @@ def _toggle_startup(icon, item):
 
 
 def _on_exit(icon, item):
-    global running
+    global running, hook_handle
     running = False
-    keyboard.unhook_all()
+    if hook_handle:
+        user32.UnhookWindowsHookEx(hook_handle)
+        hook_handle = None
     icon.stop()
 
 
-def _toggle_trigger_key(icon, item):
-    """Перемикає клавішу ручного перемикання між ` та '"""
-    global MANUAL_TRIGGER_KEY
-    if MANUAL_TRIGGER_KEY == '`':
-        MANUAL_TRIGGER_KEY = "'"
-    else:
-        MANUAL_TRIGGER_KEY = '`'
-    icon.update_menu()
+def _trigger_name():
+    return "Подвійне ` (backtick)" if trigger_key == VK_OEM_3 else "Подвійне ' (апостроф)"
 
 
 def _make_menu():
     return pystray.Menu(
         pystray.MenuItem(
-            lambda item: "✅ Перемикання увімкнено" if enabled else "⏸ Перемикання вимкнено",
+            lambda item: "✅ Автоперемикання увімкнено" if enabled else "⏸ Автоперемикання вимкнено",
             _toggle_enabled,
             checked=lambda item: enabled,
         ),
         pystray.MenuItem(
-            lambda item: f"⌨️ Ручне: подвійне {MANUAL_TRIGGER_KEY}",
-            _toggle_trigger_key,
+            lambda item: f"⌨️ Ручне: {_trigger_name()}",
+            _toggle_trigger,
         ),
         pystray.MenuItem(
             lambda item: "✅ Автозапуск увімкнено" if is_in_startup() else "❌ Автозапуск вимкнено",
@@ -486,43 +495,71 @@ def _make_menu():
 
 
 def run_tray():
-    """Запускає іконку в системному трею."""
     icon = pystray.Icon(
         "Qwasda",
         _create_icon_image(),
         "Qwasda — перемикання розкладки",
         _make_menu(),
     )
-    # Показуємо сповіщення при старті
-    icon.notify("Qwasda запущено! Керуйте через іконку в треї.", "Qwasda")
+    icon.notify("Qwasda запущено!", "Qwasda")
     icon.run()
 
 
-# ─── Main ──────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    global running
+    global running, hook_handle
 
-    keyboard.hook(on_key_event)
+    # Встановлюємо low-level hook — ЯК У PUNTO SWITCHER
+    # ВАЖЛИВО: для WH_KEYBOARD_LL потрібен HINSTANCE з pythonapi, не з kernel32!
+    hinst = ctypes.pythonapi._handle
+    hook_handle = user32.SetWindowsHookExW(
+        WH_KEYBOARD_LL,
+        keyboard_hook,
+        hinst,
+        0
+    )
 
+    if not hook_handle:
+        err = kernel32.GetLastError()
+        try:
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                f"Не вдалося встановити клавіатурний хук (помилка {err}).\n"
+                "Спробуйте запустити від імені адміністратора.",
+                "Qwasda — Помилка",
+                0x10
+            )
+        except Exception:
+            pass
+        sys.exit(1)
+
+    # Запускаємо трей
     tray_thread = threading.Thread(target=run_tray, daemon=True)
     tray_thread.start()
 
-    atexit.register(lambda: keyboard.unhook_all())
+    atexit.register(lambda: user32.UnhookWindowsHookEx(hook_handle) if hook_handle else None)
 
     def handler(sig, frame):
-        global running
+        global running, hook_handle
         running = False
-        keyboard.unhook_all()
+        if hook_handle:
+            user32.UnhookWindowsHookEx(hook_handle)
+            hook_handle = None
         sys.exit(0)
 
     signal.signal(signal.SIGINT, handler)
 
-    try:
-        while running:
-            time.sleep(0.1)
-    except KeyboardInterrupt:
-        keyboard.unhook_all()
+    # Message loop — обов'язковий для low-level hooks
+    msg = wintypes.MSG()
+    while running:
+        result = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+        if result == 0 or result == -1:
+            break
+        user32.TranslateMessage(ctypes.byref(msg))
+        user32.DispatchMessageW(ctypes.byref(msg))
 
 
 if __name__ == "__main__":

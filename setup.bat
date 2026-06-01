@@ -17,7 +17,7 @@ if errorlevel 1 (
 )
 
 echo [1/3] Встановлення залежностей...
-pip install keyboard pystray pillow
+pip install pystray pillow
 if errorlevel 1 (
     echo [Помилка] Не вдалося встановити залежності.
     pause
@@ -28,9 +28,16 @@ echo [2/3] Додавання до автозапуску...
 set "STARTUP_DIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 set "SCRIPT_DIR=%~dp0"
 
+:: Знаходимо pythonw.exe
+for /f "tokens=*" %%i in ('where pythonw 2^>nul') do set "PYTHONW=%%i"
+if not defined PYTHONW (
+    for /f "tokens=*" %%i in ('where python 2^>nul') do set "PYTHONW=%%i"
+    if defined PYTHONW set "PYTHONW=!PYTHONW:python.exe=pythonw.exe!"
+)
+
 (
 echo @echo off
-echo start "" pythonw "%SCRIPT_DIR%qwasda.py"
+echo start "" "!PYTHONW!" "%SCRIPT_DIR%qwasda.py"
 ) > "%STARTUP_DIR%\Qwasda.bat"
 
 echo [3/3] Готово!

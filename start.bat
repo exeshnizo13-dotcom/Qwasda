@@ -14,7 +14,7 @@ if errorlevel 1 (
 )
 
 :: Встановлюємо залежності якщо потрібно
-pip install -q keyboard pystray pillow
+pip install -q pystray pillow
 
 :: Запускаємо Qwasda БЕЗ консолі через pythonw.exe
 start "" pythonw "%SCRIPT_DIR%qwasda.py"
