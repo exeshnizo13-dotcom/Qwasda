@@ -3,7 +3,8 @@ Qwasda — автоматичне визначення та перемиканн
 Виявляє, коли користувач друкує в неправильній розкладці (укр/англ),
 перемикає розкладку та виправляє набраний текст.
 
-Запуск: python qwasda.py
+Запуск: pythonw qwasda.py  (без консолі)
+        або start.bat
 Вихід: правий клік на іконці в треї → "Вихід"
 """
 
@@ -16,19 +17,49 @@ import atexit
 import signal
 import threading
 
+# ─── Приховуємо консоль ───────────────────────────────────────────────────────
+# Якщо запущено через pythonw.exe — консолі немає.
+# Якщо запущено через python.exe — приховуємо вікно консолі.
+if sys.stdout is None or not sys.stdout.isatty():
+    # Вже запущено без консолі (pythonw)
+    pass
+else:
+    # Намагаємось приховати консоль
+    try:
+        ctypes.windll.user32.ShowWindow(
+            ctypes.windll.kernel32.GetConsoleWindow(), 0  # SW_HIDE = 0
+        )
+    except Exception:
+        pass
+
 try:
     import keyboard
 except ImportError:
-    print("Помилка: бібліотека 'keyboard' не встановлена.")
-    print("Запустіть: pip install keyboard")
+    # Якщо консоль прихована — показуємо повідомлення
+    try:
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            "Бібліотека 'keyboard' не встановлена.\nЗапустіть: pip install keyboard",
+            "Qwasda — Помилка",
+            0x10  # MB_ICONERROR
+        )
+    except Exception:
+        pass
     sys.exit(1)
 
 try:
     import pystray
     from PIL import Image, ImageDraw, ImageFont
 except ImportError:
-    print("Помилка: бібліотеки 'pystray' та 'pillow' не встановлені.")
-    print("Запустіть: pip install pystray pillow")
+    try:
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            "Бібліотеки 'pystray' та 'pillow' не встановлені.\nЗапустіть: pip install pystray pillow",
+            "Qwasda — Помилка",
+            0x10
+        )
+    except Exception:
+        pass
     sys.exit(1)
 
 
@@ -317,6 +348,8 @@ def run_tray():
         "Qwasda — перемикання розкладки",
         _make_menu(),
     )
+    # Показуємо сповіщення при старті
+    icon.notify("Qwasda запущено! Керуйте через іконку в треї.", "Qwasda")
     icon.run()
 
 
@@ -325,21 +358,7 @@ def run_tray():
 def main():
     global running
 
-    print("=" * 55)
-    print("  Qwasda")
-    print("  Automatic keyboard layout switcher (EN/UK)")
-    print("=" * 55)
-
     keyboard.hook(on_key_event)
-    print("\n✅ Keyboard hook installed.")
-
-    if is_in_startup():
-        print("✅ Autostart enabled.")
-    else:
-        print("ℹ️  Autostart disabled. Enable via tray icon.")
-
-    print("\nTip: type 'ghbdtn' in EN layout -> 'привіт'")
-    print("     Manage via the tray icon.\n")
 
     tray_thread = threading.Thread(target=run_tray, daemon=True)
     tray_thread.start()

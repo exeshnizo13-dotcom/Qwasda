@@ -30,7 +30,7 @@ set "SCRIPT_DIR=%~dp0"
 
 (
 echo @echo off
-echo start "" "%SCRIPT_DIR%start.bat"
+echo start "" pythonw "%SCRIPT_DIR%qwasda.py"
 ) > "%STARTUP_DIR%\Qwasda.bat"
 
 echo [3/3] Готово!

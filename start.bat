@@ -1,6 +1,5 @@
 @echo off
 chcp 65001 >nul 2>&1
-title Qwasda
 
 :: Знаходимо директорію скрипта
 set "SCRIPT_DIR=%~dp0"
@@ -15,17 +14,7 @@ if errorlevel 1 (
 )
 
 :: Встановлюємо залежності якщо потрібно
-echo Перевірка залежностей...
 pip install -q keyboard pystray pillow
 
-:: Запускаємо Qwasda
-echo Запуск Qwasda...
-echo.
-python "%SCRIPT_DIR%qwasda.py"
-
-:: Якщо програма завершилась з помилкою
-if errorlevel 1 (
-    echo.
-    echo [Помилка] Qwasda завершилась з помилкою.
-    pause
-)
+:: Запускаємо Qwasda БЕЗ консолі через pythonw.exe
+start "" pythonw "%SCRIPT_DIR%qwasda.py"
