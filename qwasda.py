@@ -190,17 +190,115 @@ def send_unicode_char(char):
     _send_inputs(down, up)
 
 
+# ─── Налаштування ──────────────────────────────────────────────────────────────
+
+# Клавіша для ручного перемикання (подвійне натискання)
+MANUAL_TRIGGER_KEY = '`'  # backtick (код 223 на клавіатурі)
+# Альтернативна клавіша: "'" (апостроф)
+
+# Чутливість подвійного натискання (секунди)
+DOUBLE_PRESS_INTERVAL = 0.4
+
+
 # ─── Стан ──────────────────────────────────────────────────────────────────────
 
 running = True
 last_correction_time = 0
 enabled = True
+last_trigger_press_time = 0  # Час останнього натискання тригера
+typed_buffer = ""  # Буфер набраних символів
+
+
+# ─── Функція конвертації тексту ────────────────────────────────────────────────
+
+def convert_text(text):
+    """Конвертує текст з однієї розкладки в іншу.
+    Повертає (converted_text, target_layout).
+    Якщо конвертація не потрібна — повертає (None, None).
+    """
+    if not text:
+        return None, None
+
+    # Визначаємо, яка розкладка була "задумана" за набраним текстом
+    # Якщо текст містить українські літери в англійській розкладці — конвертуємо в укр
+    # Якщо текст містить англійські літери в українській розкладці — конвертуємо в англ
+
+    has_ukr_as_eng = False
+    has_eng_as_ukr = False
+
+    for ch in text:
+        if ch in UKR_TO_ENG:
+            has_ukr_as_eng = True
+        if ch in ENG_TO_UKR:
+            has_eng_as_ukr = True
+
+    converted = None
+    target_layout = None
+
+    if has_ukr_as_eng and not has_eng_as_ukr:
+        # Набрано "українські" літери в англійській розкладці
+        converted = "".join(UKR_TO_ENG.get(ch, ch) for ch in text)
+        target_layout = LANG_UKRAINIAN
+    elif has_eng_as_ukr and not has_ukr_as_eng:
+        # Набрано "англійські" літери в українській розкладці
+        converted = "".join(ENG_TO_UKR.get(ch, ch) for ch in text)
+        target_layout = LANG_ENGLISH
+    elif has_ukr_as_eng and has_eng_as_ukr:
+        # Змішаний текст — визначаємо за більшістю
+        ukr_count = sum(1 for ch in text if ch in UKR_TO_ENG)
+        eng_count = sum(1 for ch in text if ch in ENG_TO_UKR)
+        if ukr_count >= eng_count:
+            converted = "".join(UKR_TO_ENG.get(ch, ch) for ch in text)
+            target_layout = LANG_UKRAINIAN
+        else:
+            converted = "".join(ENG_TO_UKR.get(ch, ch) for ch in text)
+            target_layout = LANG_ENGLISH
+
+    return converted, target_layout
+
+
+# ─── Ручне перемикання з виправленням ──────────────────────────────────────────
+
+def manual_convert():
+    """Викликається при подвійному натисканні тригера.
+    Копіює виділений текст (або весь текст у полі введення),
+    конвертує його і вставляє назад.
+    """
+    global typed_buffer
+
+    # Використовуємо буфер набраних символів
+    text_to_convert = typed_buffer
+    if not text_to_convert:
+        return
+
+    converted, target_layout = convert_text(text_to_convert)
+    if not converted or converted == text_to_convert:
+        return
+
+    # 1. Видаляємо набраний текст (по одному символу)
+    for _ in range(len(text_to_convert)):
+        send_key(VK_BACK)
+        time.sleep(0.005)
+
+    time.sleep(0.02)
+
+    # 2. Перемикаємо розкладку
+    switch_layout(target_layout)
+    time.sleep(0.02)
+
+    # 3. Вводимо конвертований текст
+    for ch in converted:
+        send_unicode_char(ch)
+        time.sleep(0.005)
+
+    # Очищаємо буфер
+    typed_buffer = ""
 
 
 # ─── Обробник клавіатури ──────────────────────────────────────────────────────
 
 def on_key_event(event):
-    global last_correction_time
+    global last_correction_time, last_trigger_press_time, typed_buffer
 
     if not enabled:
         return
@@ -208,10 +306,40 @@ def on_key_event(event):
         return
 
     vk = event.scan_code
+    char = event.name
+
+    # ── Перевірка на подвійне натискання тригера ──
+    if char == MANUAL_TRIGGER_KEY:
+        now = time.time()
+        if now - last_trigger_press_time < DOUBLE_PRESS_INTERVAL:
+            # Подвійне натискання! Конвертуємо текст
+            last_trigger_press_time = 0  # Скидаємо, щоб не спрацьовувало 3+ разів
+            manual_convert()
+            return  # Блокуємо саму клавішу
+        else:
+            last_trigger_press_time = now
+            # Не блокуємо — даємо клавіші пройти далі
+            return
+
     if vk in MODIFIER_KEYS or vk in NAVIGATION_KEYS:
+        # Очищаємо буфер при навігації
+        if vk == VK_BACK and typed_buffer:
+            typed_buffer = typed_buffer[:-1]
+        elif vk in (VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_TAB, VK_RETURN):
+            typed_buffer = ""
         return
 
-    char = event.name
+    # Оновлюємо буфер набраних символів
+    if char and len(char) == 1 and char not in NEUTRAL:
+        typed_buffer += char
+        if len(typed_buffer) > 200:
+            typed_buffer = typed_buffer[-100:]
+    elif char == 'space':
+        typed_buffer += ' '
+    elif vk == VK_BACK and typed_buffer:
+        typed_buffer = typed_buffer[:-1]
+
+    # ── Автоматичне виправлення ──
     if not char or len(char) != 1 or char in NEUTRAL:
         return
 
@@ -238,6 +366,9 @@ def on_key_event(event):
         switch_layout(target_layout)
         time.sleep(0.01)
         send_unicode_char(corrected)
+        # Оновлюємо буфер: замість символу додаємо виправлений
+        if typed_buffer:
+            typed_buffer = typed_buffer[:-1] + corrected
         last_correction_time = now
 
 
@@ -323,12 +454,26 @@ def _on_exit(icon, item):
     icon.stop()
 
 
+def _toggle_trigger_key(icon, item):
+    """Перемикає клавішу ручного перемикання між ` та '"""
+    global MANUAL_TRIGGER_KEY
+    if MANUAL_TRIGGER_KEY == '`':
+        MANUAL_TRIGGER_KEY = "'"
+    else:
+        MANUAL_TRIGGER_KEY = '`'
+    icon.update_menu()
+
+
 def _make_menu():
     return pystray.Menu(
         pystray.MenuItem(
             lambda item: "✅ Перемикання увімкнено" if enabled else "⏸ Перемикання вимкнено",
             _toggle_enabled,
             checked=lambda item: enabled,
+        ),
+        pystray.MenuItem(
+            lambda item: f"⌨️ Ручне: подвійне {MANUAL_TRIGGER_KEY}",
+            _toggle_trigger_key,
         ),
         pystray.MenuItem(
             lambda item: "✅ Автозапуск увімкнено" if is_in_startup() else "❌ Автозапуск вимкнено",
