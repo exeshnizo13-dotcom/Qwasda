@@ -1,0 +1,16 @@
+[project]
+name = "Qwasda"
+version = "1.0.0"
+description = "Універсальний перемикач розкладки для Windows з автокорекцією"
+authors = [{name = "exeshnizo13"}]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pystray>=0.19",
+    "pillow>=9.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"

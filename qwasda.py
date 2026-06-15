@@ -512,6 +512,8 @@ def load_dicts():
     DICT_UK = _load_index("words_uk.txt.gz")        # ~3.8M форм — бінарний пошук
     dicts_loaded = bool(len(DICT_EN) and len(DICT_UK))
     _dbg("dicts loaded: en=%d uk=%d ok=%s" % (len(DICT_EN), len(DICT_UK), dicts_loaded))
+    if tray_icon is not None:
+        tray_icon.update_menu()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -598,6 +600,7 @@ def autocorrect_target(scans, layout: int):
 running              = True
 enabled              = True
 auto_correct_enabled = True
+tray_icon            = None
 
 typed_scans       = []     # Буфер поточного слова — scan-коди клавіш (не символи)
 last_shift_time   = 0.0    # Для подвійного Shift
@@ -917,12 +920,13 @@ def _make_menu():
 
 
 def _run_tray():
-    icon = pystray.Icon(
+    global tray_icon
+    tray_icon = pystray.Icon(
         "Qwasda", _make_icon_image(),
         "Qwasda — перемикач розкладки", _make_menu(),
     )
-    icon.notify("Qwasda запущено! Подвійний Shift — перемкнути слово.", "Qwasda")
-    icon.run()
+    tray_icon.notify("Qwasda запущено! Подвійний Shift — перемкнути слово.", "Qwasda")
+    tray_icon.run()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
