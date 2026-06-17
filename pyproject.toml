@@ -1,6 +1,6 @@
 [project]
 name = "Qwasda"
-version = "1.0.0"
+version = "1.1.0"
 description = "Універсальний перемикач розкладки для Windows з автокорекцією"
 authors = [{name = "exeshnizo13"}]
 license = {text = "MIT"}

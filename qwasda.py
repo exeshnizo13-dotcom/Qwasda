@@ -617,6 +617,7 @@ _cached_layout_time = 0.0
 _correcting   = False
 _correct_lock = threading.Lock()   # серіалізує заміни (одна за раз)
 _input_seq    = 0                  # лічильник реальних натискань (для скасування гонки)
+_pending_corrections = []          # (orig_len, converted, target_layout, sep_vk) — відкладені виправлення
 
 
 def current_layout() -> int:
@@ -649,6 +650,42 @@ def _do_replace(strip_len: int, text: str, target_layout: int, sep_vk: int = 0):
         send_key(sep_vk)
     time.sleep(0.02)
     set_foreground_layout(target_layout)
+    typed_scans.clear()
+
+
+def _send_sep(sep_vk: int):
+    """Відправляє роздільник після скоригованого слова."""
+    if sep_vk == VK_SPACE:
+        send_unicode_string(" ")
+    elif sep_vk in (VK_RETURN, VK_TAB):
+        time.sleep(0.005)
+        send_key(sep_vk)
+
+
+def _do_replace_batch(pending: list, cur_len: int, cur_converted: str,
+                      cur_target: int, cur_sep_vk: int):
+    """
+    Пакетне виправлення: pending (старі відкладені слова) + поточне слово.
+    pending: список (orig_len, converted, target_layout, sep_vk) від найстарішого до найновішого.
+    Курсор стоїть після cur_sep (поточний роздільник вже на екрані).
+    """
+    cur_sep_len = 1 if cur_sep_vk in WORD_BREAK_VKS else 0
+    total_bs = cur_sep_len + cur_len
+    for orig_len, _, _, psep_vk in pending:
+        total_bs += orig_len + (1 if psep_vk in WORD_BREAK_VKS else 0)
+
+    send_backspaces(total_bs)
+    time.sleep(0.02)
+
+    for _, pconverted, _, psep_vk in pending:
+        send_unicode_string(pconverted)
+        _send_sep(psep_vk)
+
+    send_unicode_string(cur_converted)
+    _send_sep(cur_sep_vk)
+
+    time.sleep(0.02)
+    set_foreground_layout(cur_target)
     typed_scans.clear()
 
 
@@ -688,6 +725,7 @@ def manual_convert():
 
 def auto_correct_word(scans, layout: int, sep_vk: int, seq0: int):
     """Автокорекція на межі слова. seq0 — лічильник вводу на момент межі слова."""
+    global _pending_corrections
     if not _acquire_correction():
         return
     try:
@@ -696,17 +734,49 @@ def auto_correct_word(scans, layout: int, sep_vk: int, seq0: int):
             _dbg("autocorrect: ukr=%r eng=%r layout=%04x -> conv=%r target=%s"
                  % (scans_to_ukr(scans), scans_to_eng(scans), layout,
                     converted, target_layout))
-        if not converted:
-            return
+
+        if not converted and not _pending_corrections:
+            return  # Ні поточне, ні відкладені — нічого робити
+
         # Даємо роздільнику зʼявитись на екрані, тоді стираємо слово+роздільник.
         time.sleep(0.03)
-        # Якщо користувач устиг натиснути ще клавішу — курсор зрушив; скасовуємо,
-        # щоб не стерти не те (краще не виправити, ніж зіпсувати).
+
         if _input_seq != seq0:
-            _dbg("autocorrect: скасовано (користувач продовжив друк)")
+            # Користувач продовжив друк.
+            if converted:
+                # Поточне слово теж неправильне — зберігаємо у відкладені.
+                _pending_corrections.append((len(scans), converted, target_layout, sep_vk))
+                _dbg("autocorrect: відкладено (pending=%d)" % len(_pending_corrections))
+            else:
+                # Поточне слово правильне — відкладені не можемо безпечно застосувати
+                # (курсор зрушив), очищуємо.
+                _pending_corrections.clear()
             return
+
         sep_len = 1 if sep_vk in WORD_BREAK_VKS else 0
-        _do_replace(len(scans) + sep_len, converted, target_layout, sep_vk)
+        pending = list(_pending_corrections)
+        _pending_corrections.clear()
+
+        if not converted:
+            # Поточне слово правильне, але є відкладені — виправляємо їх,
+            # а поточне слово передруковуємо без змін.
+            cur_text = scans_to_ukr(scans) if layout == LANG_UKRAINIAN else scans_to_eng(scans)
+            total_bs = sep_len + len(scans)
+            for orig_len, _, _, psep_vk in pending:
+                total_bs += orig_len + (1 if psep_vk in WORD_BREAK_VKS else 0)
+            send_backspaces(total_bs)
+            time.sleep(0.02)
+            for _, pconverted, _, psep_vk in pending:
+                send_unicode_string(pconverted)
+                _send_sep(psep_vk)
+            send_unicode_string(cur_text)
+            _send_sep(sep_vk)
+            time.sleep(0.02)
+            typed_scans.clear()
+        elif pending:
+            _do_replace_batch(pending, len(scans), converted, target_layout, sep_vk)
+        else:
+            _do_replace(len(scans) + sep_len, converted, target_layout, sep_vk)
     finally:
         _release_correction()
 
@@ -777,6 +847,7 @@ def keyboard_hook(nCode, wParam, lParam):
     # ── Ctrl / Alt / Win утиснуто — не чіпаємо хоткеї ───────────────────────
     if any_modifier_down():
         typed_scans.clear()
+        _pending_corrections.clear()
         return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
     if not enabled:
@@ -786,11 +857,13 @@ def keyboard_hook(nCode, wParam, lParam):
     if vk == VK_BACK:
         if typed_scans:
             typed_scans.pop()
+        _pending_corrections.clear()
         return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
     # ── Навігація — скидаємо буфер (курсор перемістився) ────────────────────
     if vk in NAV_CLEAR_VKS:
         typed_scans.clear()
+        _pending_corrections.clear()
         return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
     # ── Межа слова (пробіл / Enter / Tab) ───────────────────────────────────
