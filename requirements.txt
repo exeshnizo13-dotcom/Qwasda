@@ -1,3 +1,4 @@
 # Qwasda — автоматичне перемикання розкладки клавіатури
-pystray>=0.19.0
-pillow>=10.0.0
+# (синхронізовано з pyproject.toml [project.dependencies])
+pystray>=0.19
+pillow>=10.0

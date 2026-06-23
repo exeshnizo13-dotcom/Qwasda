@@ -1,0 +1,311 @@
+"""
+Юніт-тести чистої логіки Qwasda (без Win32-вводу).
+
+Покривають конвертацію scan-кодів між розкладками, словниковий
+бінарний пошук (SortedWordIndex), автокорекцію та ручне перемикання.
+Імпорт qwasda не встановлює клавіатурний хук — він лише в main().
+"""
+
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import qwasda  # noqa: E402
+from qwasda import (  # noqa: E402
+    SortedWordIndex,
+    DoubleTapDetector,
+    scans_to_ukr,
+    scans_to_eng,
+    manual_target,
+    autocorrect_target,
+    LANG_UKRAINIAN,
+    LANG_ENGLISH,
+)
+
+# Зворотна мапа «англ. літера → scan-код», щоб будувати буфери з рядків.
+_ENG_TO_SCAN = {c: s for s, c in qwasda.SCAN_ENG.items()}
+
+
+def scans(eng_word: str, caps=None):
+    """
+    Буфер scan-кодів для англійських літер слова.
+    caps — необов'язковий список булів (Shift/Caps) тієї ж довжини.
+    """
+    if caps is None:
+        caps = [False] * len(eng_word)
+    return [(_ENG_TO_SCAN[c], caps[i]) for i, c in enumerate(eng_word)]
+
+
+# ───────────────────────── Конвертація розкладок ──────────────────────────
+
+def test_eng_reading_is_identity():
+    assert scans_to_eng(scans("hello")) == "hello"
+
+
+def test_ukr_reading_of_hello():
+    # «руддщ» — як виглядає «hello» в укр. розкладці (приклад із README).
+    assert scans_to_ukr(scans("hello")) == "руддщ"
+
+
+def test_ukr_reading_of_pryvit():
+    # ghbdsn → привіт (приклад із README).
+    assert scans_to_ukr(scans("ghbdsn")) == "привіт"
+
+
+def test_case_is_preserved():
+    caps = [True] + [False] * 4          # перша літера велика
+    assert scans_to_eng(scans("hello", caps)) == "Hello"
+    assert scans_to_ukr(scans("hello", caps)) == "Руддщ"
+
+
+def test_punctuation_positions_map_to_ukr_letters():
+    # клавіша ';' (scan 0x27) в укр. розкладці — це 'ж'
+    assert scans_to_ukr([(0x27, False)]) == "ж"
+    assert scans_to_eng([(0x27, False)]) == ";"
+
+
+# ───────────────────────── Ручне перемикання ──────────────────────────────
+
+def test_manual_target_uk_to_en():
+    conv, target = manual_target(scans("ghbdsn"), LANG_UKRAINIAN)
+    assert conv == "ghbdsn"
+    assert target == LANG_ENGLISH
+
+
+def test_manual_target_en_to_uk():
+    conv, target = manual_target(scans("ghbdsn"), LANG_ENGLISH)
+    assert conv == "привіт"
+    assert target == LANG_UKRAINIAN
+
+
+def test_manual_target_ignores_other_layouts():
+    assert manual_target(scans("hello"), 0x0419) == (None, None)   # рос.
+
+
+def test_manual_target_empty_buffer():
+    assert manual_target([], LANG_ENGLISH) == (None, None)
+
+
+# ───────────────────────── SortedWordIndex ────────────────────────────────
+
+def _index(words):
+    # рядки мають бути відсортовані в байтовому порядку UTF-8
+    data = "\n".join(sorted(words, key=lambda w: w.encode("utf-8")))
+    return SortedWordIndex((data + "\n").encode("utf-8"))
+
+
+def test_index_membership():
+    idx = _index(["привіт", "слово", "тест"])
+    assert "привіт" in idx
+    assert "тест" in idx
+    assert "немає" not in idx
+
+
+def test_index_len():
+    assert len(_index(["a", "b", "c"])) == 3
+
+
+def test_index_empty():
+    idx = SortedWordIndex(b"")
+    assert len(idx) == 0
+    assert "будь-що" not in idx
+
+
+def test_index_handles_crlf():
+    idx = SortedWordIndex(b"abc\r\nxyz\r\n")
+    assert "abc" in idx
+    assert "xyz" in idx
+
+
+def test_index_adds_trailing_newline():
+    idx = SortedWordIndex("привіт".encode("utf-8"))   # без \n у кінці
+    assert "привіт" in idx
+
+
+def test_index_rejects_oversized(monkeypatch):
+    class _Huge:
+        def __contains__(self, _):  # pragma: no cover
+            return False
+
+        def endswith(self, _):
+            return True
+
+        def __len__(self):
+            return 2 ** 32
+
+        def replace(self, *a):
+            return self
+    with pytest.raises(ValueError):
+        SortedWordIndex(_Huge())
+
+
+# ───────────────────────── Автокорекція ───────────────────────────────────
+
+@pytest.fixture
+def dicts(monkeypatch):
+    """Підставляє мінімальні словники й вмикає dicts_loaded."""
+    monkeypatch.setattr(qwasda, "DICT_EN", frozenset({"hello", "the", "cat"}))
+    monkeypatch.setattr(qwasda, "DICT_UK", _index(["привіт", "кіт", "так"]))
+    monkeypatch.setattr(qwasda, "dicts_loaded", True)
+    monkeypatch.setattr(qwasda, "MIN_AUTOCORRECT_LEN", 2)
+    monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 3)
+
+
+def test_autocorrect_uk_to_en(dicts):
+    # На екрані «руддщ» (UK), але це «hello» в англ. читанні.
+    conv, target = autocorrect_target(scans("hello"), LANG_UKRAINIAN)
+    assert conv == "hello"
+    assert target == LANG_ENGLISH
+
+
+def test_autocorrect_en_to_uk(dicts):
+    # На екрані «ghbdsn» (EN), але це «привіт» в укр. читанні.
+    conv, target = autocorrect_target(scans("ghbdsn"), LANG_ENGLISH)
+    assert conv == "привіт"
+    assert target == LANG_UKRAINIAN
+
+
+def test_autocorrect_leaves_valid_en_word(dicts):
+    assert autocorrect_target(scans("hello"), LANG_ENGLISH) == (None, None)
+
+
+def test_autocorrect_leaves_valid_uk_word(dicts):
+    # «привіт» валідне в UK — не чіпати.
+    assert autocorrect_target(scans("ghbdsn"), LANG_UKRAINIAN) == (None, None)
+
+
+def test_autocorrect_respects_min_len(dicts):
+    # «the» → укр. читання коротке; нижче MIN_AUTOCORRECT_LEN взагалі ігнор.
+    assert autocorrect_target(scans("h"), LANG_ENGLISH) == (None, None)
+
+
+def test_autocorrect_en_to_uk_threshold(dicts, monkeypatch):
+    # «ghbdsn» (6 літер) дає валідне укр. «привіт», але поріг MIN_EN_TO_UK=7
+    # вищий за довжину слова — корекції бути не повинно.
+    monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 7)
+    assert autocorrect_target(scans("ghbdsn"), LANG_ENGLISH) == (None, None)
+    # А зі стандартним порогом 3 — виправляється.
+    monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 3)
+    assert autocorrect_target(scans("ghbdsn"), LANG_ENGLISH) == ("привіт", LANG_UKRAINIAN)
+
+
+def test_autocorrect_disabled_without_dicts(monkeypatch):
+    monkeypatch.setattr(qwasda, "dicts_loaded", False)
+    assert autocorrect_target(scans("ghbdsn"), LANG_ENGLISH) == (None, None)
+
+
+def test_autocorrect_ignores_other_layouts(dicts):
+    assert autocorrect_target(scans("ghbdsn"), 0x0419) == (None, None)
+
+
+# ───────────────────────── Подвійний Ctrl (DoubleTapDetector) ─────────────
+
+WIN = 0.4   # вікно подвійного тапу для тестів
+
+
+def test_double_tap_fires_on_second_release():
+    d = DoubleTapDetector()
+    # тап 1: down, up @ t=1.0
+    d.on_trigger_down()
+    assert d.on_trigger_up(1.0, WIN) is False        # перший тап — ще не час
+    # тап 2: down, up @ t=1.2 (у межах вікна)
+    d.on_trigger_down()
+    assert d.on_trigger_up(1.2, WIN) is True          # другий чистий тап — спрацювати
+
+
+def test_double_tap_too_slow_does_not_fire():
+    d = DoubleTapDetector()
+    d.on_trigger_down()
+    d.on_trigger_up(1.0, WIN)
+    d.on_trigger_down()
+    assert d.on_trigger_up(1.0 + WIN + 0.01, WIN) is False   # за межами вікна
+
+
+def test_other_key_between_taps_breaks_chain():
+    d = DoubleTapDetector()
+    d.on_trigger_down()
+    d.on_trigger_up(1.0, WIN)
+    d.on_other_key()                                  # натиснули літеру між тапами
+    d.on_trigger_down()
+    assert d.on_trigger_up(1.1, WIN) is False
+
+
+def test_ctrl_plus_key_is_not_a_tap():
+    # Ctrl+C: Ctrl down, потім C (інша клавіша), потім Ctrl up — не тап.
+    d = DoubleTapDetector()
+    d.on_trigger_down()
+    d.on_other_key()                                  # 'C' поки Ctrl утиснутий
+    assert d.on_trigger_up(1.0, WIN) is False
+    # навіть наступний чистий тап одразу не має спрацювати (ланцюг порожній)
+    d.on_trigger_down()
+    assert d.on_trigger_up(1.05, WIN) is False
+
+
+def test_autorepeat_down_is_ignored():
+    # Утримання Ctrl шле багато down без up — не має псувати перший тап.
+    d = DoubleTapDetector()
+    d.on_trigger_down()
+    d.on_trigger_down()                               # auto-repeat
+    d.on_trigger_down()
+    assert d.on_trigger_up(1.0, WIN) is False         # завершився перший тап
+    d.on_trigger_down()
+    assert d.on_trigger_up(1.2, WIN) is True
+
+
+def test_triple_tap_fires_once_then_needs_new_pair():
+    d = DoubleTapDetector()
+    d.on_trigger_down(); d.on_trigger_up(1.0, WIN)
+    d.on_trigger_down()
+    assert d.on_trigger_up(1.1, WIN) is True           # 2-й тап спрацював
+    d.on_trigger_down()
+    assert d.on_trigger_up(1.2, WIN) is False          # 3-й — нова пара лише починається
+
+
+# ───────────────────────── Конфіг (персистентність) ───────────────────────
+
+@pytest.fixture
+def cfg_path(tmp_path, monkeypatch):
+    p = tmp_path / "config.json"
+    monkeypatch.setattr(qwasda, "APP_DIR", str(tmp_path))
+    monkeypatch.setattr(qwasda, "CONFIG_PATH", str(p))
+    return p
+
+
+def test_config_round_trip(cfg_path, monkeypatch):
+    monkeypatch.setattr(qwasda, "enabled", False)
+    monkeypatch.setattr(qwasda, "auto_correct_enabled", False)
+    monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 5)
+    qwasda.save_config()
+    # повертаємо «дефолти», тоді читаємо з файлу
+    monkeypatch.setattr(qwasda, "enabled", True)
+    monkeypatch.setattr(qwasda, "auto_correct_enabled", True)
+    monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 3)
+    qwasda.load_config()
+    assert qwasda.enabled is False
+    assert qwasda.auto_correct_enabled is False
+    assert qwasda.MIN_EN_TO_UK == 5
+
+
+def test_load_config_missing_file_is_noop(cfg_path, monkeypatch):
+    monkeypatch.setattr(qwasda, "enabled", True)
+    qwasda.load_config()                  # файлу нема — нічого не падає
+    assert qwasda.enabled is True
+
+
+def test_load_config_ignores_garbage(cfg_path, monkeypatch):
+    cfg_path.write_text("{ not json", encoding="utf-8")
+    monkeypatch.setattr(qwasda, "enabled", True)
+    qwasda.load_config()
+    assert qwasda.enabled is True
+
+
+def test_load_config_rejects_bad_types(cfg_path, monkeypatch):
+    cfg_path.write_text('{"enabled": "yes", "min_en_to_uk": -1}', encoding="utf-8")
+    monkeypatch.setattr(qwasda, "enabled", True)
+    monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 3)
+    qwasda.load_config()
+    assert qwasda.enabled is True         # рядок замість bool — проігноровано
+    assert qwasda.MIN_EN_TO_UK == 3       # від'ємне число — проігноровано

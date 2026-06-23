@@ -2,8 +2,9 @@
 Qwasda — перемикач розкладки клавіатури (EN ↔ UK).
 
 Ручне перемикання:
-  Подвійне натискання Shift (два Shift поспіль без іншої клавіші між ними) —
-  поточне слово конвертується між розкладками.
+  Подвійне натискання Ctrl (два Ctrl поспіль без іншої клавіші між ними) —
+  поточне слово конвертується між розкладками. Спрацьовує на відпусканні
+  другого Ctrl, щоб виправлення не склалось у Ctrl-хоткей.
 
 Автокорекція (за словниками uk/en):
   На межі слова (пробіл/Enter/Tab) програма перевіряє набране слово:
@@ -25,6 +26,7 @@ Qwasda — перемикач розкладки клавіатури (EN ↔ UK
 
 import sys
 import os
+import json
 import gzip
 import time
 from array import array
@@ -33,6 +35,8 @@ import ctypes.wintypes
 import atexit
 import signal
 import threading
+
+__version__ = "1.2.0"
 
 try:
     import pystray
@@ -112,7 +116,10 @@ KLF_ACTIVATE   = 0x00000001
 LANG_ENGLISH   = 0x0409
 LANG_UKRAINIAN = 0x0422
 
-SHIFT_VKS = frozenset({VK_SHIFT, VK_LSHIFT, VK_RSHIFT})
+# Клавіша-тригер ручного перемикання — подвійний Ctrl.
+# (Shift був ненадійним: його тиснуть постійно для великих літер, тож
+#  послідовність «два Shift поспіль» легко рветься звичайним друком.)
+CTRL_VKS = frozenset({VK_CONTROL, VK_LCONTROL, VK_RCONTROL})
 
 MODIFIER_VKS = frozenset({
     VK_SHIFT, VK_CONTROL, VK_MENU, VK_CAPITAL,
@@ -123,9 +130,13 @@ MODIFIER_VKS = frozenset({
 WORD_BREAK_VKS = frozenset({VK_SPACE, VK_RETURN, VK_TAB})
 NAV_CLEAR_VKS  = frozenset({VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN, VK_ESCAPE})
 
-MIN_AUTOCORRECT_LEN = 2   # не виправляти надто короткі слова
-MIN_EN_TO_UK        = 3   # напрямок EN→UK суворіший: укр. словник величезний (3.8M),
-                          # тож короткі латинські токени легко випадково «стають» укр.
+# Пороги корекції та вікно подвійного тапу — значення за замовчуванням.
+# Перевизначаються з config.json (див. load_config) і доступні як глобальні
+# змінні, бо налаштовуються користувачем у рантаймі.
+MIN_AUTOCORRECT_LEN  = 2     # не виправляти надто короткі слова
+MIN_EN_TO_UK         = 3     # напрямок EN→UK суворіший: укр. словник величезний (3.8M),
+                             # тож короткі латинські токени легко випадково «стають» укр.
+DOUBLE_TAP_WINDOW    = 0.4   # макс. пауза (с) між двома Ctrl, щоб вважати їх «подвійним»
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Scan code → символ (фізична позиція → символ у розкладці)
@@ -218,8 +229,8 @@ class INPUT(ctypes.Structure):
     _fields_ = [("type", ctypes.c_ulong), ("union", _InputUnion)]
 
 
-assert ctypes.sizeof(INPUT) == 40 or ctypes.sizeof(ctypes.c_void_p) == 4, \
-    "INPUT struct size mismatch — SendInput не працюватиме"
+if ctypes.sizeof(INPUT) != 40 and ctypes.sizeof(ctypes.c_void_p) != 4:
+    raise RuntimeError("INPUT struct size mismatch — SendInput не працюватиме")
 
 
 user32.SetWindowsHookExW.restype  = ctypes.c_void_p
@@ -258,6 +269,8 @@ user32.GetGUIThreadInfo.argtypes = [ctypes.c_ulong, ctypes.c_void_p]
 user32.GetKeyboardLayoutList.restype  = ctypes.c_int
 user32.GetKeyboardLayoutList.argtypes = [ctypes.c_int, ctypes.c_void_p]
 kernel32.GetCurrentThreadId.restype = ctypes.c_ulong
+kernel32.CreateMutexW.restype  = ctypes.c_void_p
+kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -447,7 +460,8 @@ class SortedWordIndex:
             data = data.replace(b"\r", b"")
         if data and not data.endswith(b"\n"):
             data += b"\n"
-        assert len(data) < 2 ** 32, "словник завеликий для 32-бітних офсетів"
+        if len(data) >= 2 ** 32:
+            raise ValueError("словник завеликий для 32-бітних офсетів")
         self._data = data
         offs = array("I", [0])            # 4 байти/запис (офсети < 4 ГБ) — економить ~15 МБ
         find, append = data.find, offs.append
@@ -594,6 +608,110 @@ def autocorrect_target(scans, layout: int):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Конфігурація (персистентна, %APPDATA%\Qwasda\config.json)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+APP_DIR     = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "Qwasda")
+CONFIG_PATH = os.path.join(APP_DIR, "config.json")
+
+# Ключі конфігу, що мапляться на однойменні (великими) глобальні змінні-пороги.
+_CONFIG_TUNABLES = ("MIN_AUTOCORRECT_LEN", "MIN_EN_TO_UK", "DOUBLE_TAP_WINDOW")
+
+
+def _config_snapshot() -> dict:
+    """Поточний стан, який варто зберегти між запусками."""
+    g = globals()
+    snap = {
+        "enabled": enabled,
+        "auto_correct_enabled": auto_correct_enabled,
+    }
+    for k in _CONFIG_TUNABLES:
+        snap[k.lower()] = g[k]
+    return snap
+
+
+def load_config():
+    """Читає config.json і застосовує його до глобального стану (тихо, якщо файлу нема)."""
+    global enabled, auto_correct_enabled
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return
+    if not isinstance(cfg, dict):
+        return
+    if isinstance(cfg.get("enabled"), bool):
+        enabled = cfg["enabled"]
+    if isinstance(cfg.get("auto_correct_enabled"), bool):
+        auto_correct_enabled = cfg["auto_correct_enabled"]
+    g = globals()
+    for k in _CONFIG_TUNABLES:
+        v = cfg.get(k.lower())
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+            g[k] = v
+    _dbg("config loaded: %s" % _config_snapshot())
+
+
+def save_config():
+    """Атомарно зберігає поточний стан у config.json (помилки не фатальні)."""
+    try:
+        os.makedirs(APP_DIR, exist_ok=True)
+        tmp = CONFIG_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_config_snapshot(), f, ensure_ascii=False, indent=2)
+        os.replace(tmp, CONFIG_PATH)
+    except OSError as e:
+        _dbg("save_config failed: %s" % e)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Детектор подвійного тапу клавіші-тригера (подвійний Ctrl)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class DoubleTapDetector:
+    """
+    Розпізнає подвійний тап клавіші-тригера (Ctrl) — два чистих тапи поспіль
+    без будь-якої іншої клавіші між ними. Спрацьовує на ВІДПУСКАННІ другого
+    тапу, щоб у момент дії фізична клавіша вже була відпущена.
+
+    Чистий тап = Ctrl натиснуто й відпущено, і поки він був утиснутий, не
+    натискали інших клавіш (інакше це хоткей на кшталт Ctrl+C, не тап).
+    """
+    __slots__ = ("_last_tap", "_down", "_interrupted")
+
+    def __init__(self):
+        self._last_tap    = 0.0
+        self._down        = False
+        self._interrupted = True   # поки не було чистого тапу
+
+    def on_trigger_down(self):
+        """Натискання Ctrl (auto-repeat ігнорується)."""
+        if not self._down:
+            self._down        = True
+            self._interrupted = False
+
+    def on_trigger_up(self, now: float, window: float) -> bool:
+        """
+        Відпускання Ctrl. Повертає True, якщо це другий чистий тап у межах
+        вікна `window` секунд — тобто час спрацювати.
+        """
+        self._down = False
+        if self._interrupted:
+            self._last_tap = 0.0
+            return False
+        if self._last_tap and now - self._last_tap < window:
+            self._last_tap = 0.0
+            return True
+        self._last_tap = now       # перший тап — чекаємо другий
+        return False
+
+    def on_other_key(self):
+        """Будь-яка інша клавіша «бруднить» поточний тап і рве ланцюг."""
+        self._interrupted = True
+        self._last_tap    = 0.0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Глобальний стан
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -601,11 +719,9 @@ running              = True
 enabled              = True
 auto_correct_enabled = True
 tray_icon            = None
+ctrl_tap             = DoubleTapDetector()
 
 typed_scans       = []     # Буфер поточного слова — scan-коди клавіш (не символи)
-last_shift_time   = 0.0    # Для подвійного Shift
-shift_interrupted = True   # True = між двома Shift була інша клавіша
-shift_down        = False  # Shift фізично утиснутий (фільтр auto-repeat)
 hook_handle       = None
 main_thread_id    = 0
 
@@ -620,11 +736,15 @@ _input_seq    = 0                  # лічильник реальних нат�
 _pending_corrections = []          # (orig_len, converted, target_layout, sep_vk) — відкладені виправлення
 
 
-def current_layout() -> int:
-    """Кешована розкладка активного вікна (оновлюється не частіше ~4/с)."""
+def current_layout(force: bool = False) -> int:
+    """
+    Кешована розкладка активного вікна (оновлюється не частіше ~4/с).
+    force=True — читати свіже значення (для ручних дій, де 250мс лагу кешу
+    дали б конвертацію в неправильному напрямку, якщо щойно перемкнули вручну).
+    """
     global _cached_layout, _cached_layout_time
     now = time.time()
-    if now - _cached_layout_time > 0.25:
+    if force or now - _cached_layout_time > 0.25:
         _cached_layout      = get_foreground_layout()
         _cached_layout_time = now
     return _cached_layout
@@ -705,14 +825,14 @@ def _release_correction():
 
 
 def manual_convert():
-    """Ручне перемикання — подвійний Shift. Конвертує поточне слово."""
+    """Ручне перемикання — подвійний Ctrl. Конвертує поточне слово."""
     if not _acquire_correction():
         return
     try:
         scans = list(typed_scans)
         if not scans:
             return
-        layout = current_layout()
+        layout = current_layout(force=True)   # свіже читання: користувач міг щойно перемкнути вручну
         converted, target_layout = manual_target(scans, layout)
         _dbg("manual_convert: scans=%d layout=%04x -> conv=%r target=%s"
              % (len(scans), layout, converted, target_layout))
@@ -788,7 +908,7 @@ def auto_correct_word(scans, layout: int, sep_vk: int, seq0: int):
 @ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int,
                     ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM)
 def keyboard_hook(nCode, wParam, lParam):
-    global last_shift_time, shift_interrupted, shift_down, _input_seq
+    global _input_seq
 
     if nCode < 0:
         return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
@@ -807,10 +927,14 @@ def keyboard_hook(nCode, wParam, lParam):
     if flags & LLKHF_INJECTED:
         return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
-    # ── Відпускання Shift — лише знімаємо прапорець фізичного натискання ─────
+    # ── Відпускання клавіш ──────────────────────────────────────────────────
     if is_up:
-        if vk in SHIFT_VKS:
-            shift_down = False
+        # Подвійний Ctrl спрацьовує на ВІДПУСКАННІ другого Ctrl: на момент друку
+        # виправлення фізичний Ctrl уже відпущений, тож backspace та літери не
+        # складаються в Ctrl-хоткеї (Ctrl+Backspace тощо).
+        if vk in CTRL_VKS and ctrl_tap.on_trigger_up(time.time(), DOUBLE_TAP_WINDOW):
+            if enabled:
+                threading.Thread(target=manual_convert, daemon=True).start()
         return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
     # ── Реальне (не ін'єктоване) натискання — рухаємо лічильник вводу ────────
@@ -818,31 +942,20 @@ def keyboard_hook(nCode, wParam, lParam):
 
     # ── Якщо корекція виконується — не заважаємо ────────────────────────────
     if _correcting:
-        shift_interrupted = True
+        ctrl_tap.on_other_key()
         return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
-    # ── Shift — обробка подвійного натискання ───────────────────────────────
-    if vk in SHIFT_VKS:
-        if not shift_down:                       # справжнє натискання (не auto-repeat)
-            shift_down = True
-            now = time.time()
-            if not shift_interrupted and now - last_shift_time < 0.4:
-                last_shift_time   = 0.0
-                shift_interrupted = True
-                if enabled:
-                    threading.Thread(target=manual_convert, daemon=True).start()
-            else:
-                last_shift_time   = now
-                shift_interrupted = False        # чекаємо другий Shift
+    # ── Ctrl — початок (потенційно чистого) тапу для подвійного натискання ───
+    if vk in CTRL_VKS:
+        ctrl_tap.on_trigger_down()
         return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
-    # ── Інші модифікатори — перериваємо послідовність Shift ──────────────────
+    # ── Будь-яка інша клавіша «бруднить» поточний Ctrl-тап і рве ланцюг ──────
+    ctrl_tap.on_other_key()
+
+    # ── Інші модифікатори (Shift/Alt/Win/Caps) — далі не обробляємо ──────────
     if vk in MODIFIER_VKS:
-        shift_interrupted = True
         return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
-
-    # ── Будь-яка не-Shift клавіша перериває послідовність подвійного Shift ───
-    shift_interrupted = True
 
     # ── Ctrl / Alt / Win утиснуто — не чіпаємо хоткеї ───────────────────────
     if any_modifier_down():
@@ -945,12 +1058,14 @@ def _make_icon_image():
 def _toggle_enabled(icon, item):
     global enabled
     enabled = not enabled
+    save_config()
     icon.update_menu()
 
 
 def _toggle_auto(icon, item):
     global auto_correct_enabled
     auto_correct_enabled = not auto_correct_enabled
+    save_config()
     icon.update_menu()
 
 
@@ -996,10 +1111,29 @@ def _run_tray():
     global tray_icon
     tray_icon = pystray.Icon(
         "Qwasda", _make_icon_image(),
-        "Qwasda — перемикач розкладки", _make_menu(),
+        "Qwasda v%s — перемикач розкладки" % __version__, _make_menu(),
     )
-    tray_icon.notify("Qwasda запущено! Подвійний Shift — перемкнути слово.", "Qwasda")
+    tray_icon.notify("Qwasda v%s запущено! Подвійний Ctrl — перемкнути слово."
+                     % __version__, "Qwasda")
     tray_icon.run()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Захист від другого екземпляра
+# ═══════════════════════════════════════════════════════════════════════════════
+
+ERROR_ALREADY_EXISTS = 183
+_instance_mutex = None   # тримаємо хендл живим увесь час роботи процесу
+
+
+def _acquire_single_instance() -> bool:
+    """
+    True, якщо ми єдиний екземпляр. Два LL-хуки одночасно дали б подвійні
+    backspace/корекції, тож при повторному запуску просто виходимо.
+    """
+    global _instance_mutex
+    _instance_mutex = kernel32.CreateMutexW(None, False, "Qwasda_SingleInstance_Mutex")
+    return kernel32.GetLastError() != ERROR_ALREADY_EXISTS
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1009,9 +1143,15 @@ def _run_tray():
 def main():
     global running, hook_handle, main_thread_id
 
+    if not _acquire_single_instance():
+        user32.MessageBoxW(None, "Qwasda вже запущено.", "Qwasda", 0x40)
+        sys.exit(0)
+
+    load_config()
+
     main_thread_id = kernel32.GetCurrentThreadId()
-    _dbg("=== Qwasda start === frozen=%s debug_log=%s"
-         % (getattr(sys, "frozen", False), _log_path))
+    _dbg("=== Qwasda v%s start === frozen=%s debug_log=%s"
+         % (__version__, getattr(sys, "frozen", False), _log_path))
 
     # Словники — у фоні, щоб не блокувати старт трею
     threading.Thread(target=load_dicts, daemon=True).start()
