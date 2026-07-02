@@ -22,6 +22,7 @@ from qwasda import (  # noqa: E402
     manual_target,
     autocorrect_target,
     convert_phrase,
+    is_word_terminator,
     learn_valid_word,
     learn_block_word,
     LANG_UKRAINIAN,
@@ -361,6 +362,24 @@ def test_convert_phrase_no_words_returns_none():
 
 def test_convert_phrase_ignores_other_layouts():
     assert convert_phrase([wtok("ghbdsn")], 0x0419) == (None, 0, None)
+
+
+# ───────────────────── Пунктуація-термінатор автокорекції ──────────────────
+
+def test_word_terminator_oem_punct():
+    assert is_word_terminator(0xBF, False) is True    # «/»
+    assert is_word_terminator(0xBF, True) is True     # «?»
+    assert is_word_terminator(0xBE, False) is True    # «.»
+
+
+def test_word_terminator_shifted_digit_only():
+    assert is_word_terminator(0x31, True) is True     # «!» (Shift+1)
+    assert is_word_terminator(0x31, False) is False   # звичайна «1» — частина слова
+
+
+def test_word_terminator_ignores_non_punct():
+    assert is_word_terminator(0x2E, False) is False   # VK_DELETE — не термінатор
+    assert is_word_terminator(0x41, False) is False   # «A»
 
 
 # ───────────────────────── Пам'ять: FORCE / BLOCK ─────────────────────────

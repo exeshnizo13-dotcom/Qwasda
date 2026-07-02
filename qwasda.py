@@ -45,7 +45,7 @@ import atexit
 import signal
 import threading
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 try:
     import pystray
@@ -138,6 +138,26 @@ MODIFIER_VKS = frozenset({
 
 WORD_BREAK_VKS = frozenset({VK_SPACE, VK_RETURN, VK_TAB})
 NAV_CLEAR_VKS  = frozenset({VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN, VK_ESCAPE})
+
+# Пунктуація-термінатор: клавіші, що ЗАВЕРШУЮТЬ слово одним видимим символом
+# і мають запускати автокорекцію на щойно набраному слові (напр. «так?» —
+# інакше слово перед пунктуацією ніколи не перевіряється). На відміну від
+# пробілу/Enter, у фразі для ручного перемикання пунктуація лишається межею.
+# OEM-клавіші пунктуації (крім тих, що в укр. розкладці є ЛІТЕРАМИ — ті йдуть
+# у буфер через scan-код і сюди не потрапляють).
+OEM_PUNCT_VKS = frozenset({
+    0xBA,  # ; :
+    0xBB,  # = +
+    0xBC,  # , <
+    0xBD,  # - _
+    0xBE,  # . >
+    0xBF,  # / ?
+    0xC0,  # ` ~
+    0xDB,  # [ {
+    0xDC,  # \ |
+    0xDD,  # ] }
+    0xDE,  # ' "
+})
 
 # Пороги корекції та вікно подвійного тапу — значення за замовчуванням.
 # Перевизначаються з config.json (див. load_config) і доступні як глобальні
@@ -433,6 +453,23 @@ def send_key(vk: int):
     user32.SendInput(2, ctypes.byref(arr), ctypes.sizeof(INPUT))
 
 
+def send_key_shifted(vk: int, shifted: bool):
+    """
+    Відтворення фізичної клавіші з врахуванням Shift — для пунктуації-термінатора
+    (напр. «?» = Shift+«/»). Відтворюємо в ПОТОЧНІЙ (ще не переключеній) розкладці,
+    тож символ виходить той самий, що набрав користувач, без ToUnicodeEx.
+    """
+    evts = []
+    if shifted:
+        evts.append(_ki(vk=VK_SHIFT, flags=0))
+    evts.append(_ki(vk=vk, flags=0))
+    evts.append(_ki(vk=vk, flags=2))
+    if shifted:
+        evts.append(_ki(vk=VK_SHIFT, flags=2))
+    arr = (INPUT * len(evts))(*evts)
+    user32.SendInput(len(evts), ctypes.byref(arr), ctypes.sizeof(INPUT))
+
+
 def send_unicode_string(text: str):
     if not text:
         return
@@ -678,6 +715,20 @@ def convert_phrase(phrase, layout: int):
     return segments, strip_len, target
 
 
+def is_word_terminator(vk: int, shifted: bool) -> bool:
+    """
+    Чи завершує ця клавіша слово одним видимим символом (пунктуація), що має
+    запускати автокорекцію попереднього слова. OEM-пунктуація — завжди;
+    цифрова клавіша — лише з Shift (символи !@#$%%^&*() тощо), бо звичайні
+    цифри часто є частиною слова-ідентифікатора.
+    """
+    if vk in OEM_PUNCT_VKS:
+        return True
+    if 0x30 <= vk <= 0x39 and shifted:
+        return True
+    return False
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Пам'ять: вивчання слів та винятків (learned.json)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -904,7 +955,30 @@ def current_layout(force: bool = False) -> int:
 # Корекція
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _do_replace(strip_len: int, text: str, target_layout: int, sep_vk: int = 0):
+def _sep_len(sep_vk: int) -> int:
+    """Скільки видимих символів займає роздільник (0 — якщо його нема)."""
+    return 1 if sep_vk else 0
+
+
+def _send_sep(sep_vk: int, sep_shifted: bool = False):
+    """
+    Відправляє роздільник після скоригованого слова:
+      • пробіл — Unicode;
+      • Enter/Tab — реальна клавіша (інакше зʼїдає перенос);
+      • пунктуація-термінатор — відтворюємо фізичну клавішу з Shift.
+    """
+    if sep_vk == VK_SPACE:
+        send_unicode_string(" ")
+    elif sep_vk in (VK_RETURN, VK_TAB):
+        time.sleep(0.005)
+        send_key(sep_vk)
+    elif sep_vk:
+        time.sleep(0.005)
+        send_key_shifted(sep_vk, sep_shifted)
+
+
+def _do_replace(strip_len: int, text: str, target_layout: int,
+                sep_vk: int = 0, sep_shifted: bool = False):
     """
     Видаляє strip_len символів, друкує text, повертає роздільник, перемикає
     розкладку. Викликати лише під _acquire_correction().
@@ -912,47 +986,32 @@ def _do_replace(strip_len: int, text: str, target_layout: int, sep_vk: int = 0):
     send_backspaces(strip_len)
     time.sleep(0.02)
     send_unicode_string(text)
-    # роздільник: пробіл — Unicode, Enter/Tab — реальна клавіша (інакше зʼїдає перенос)
-    if sep_vk == VK_SPACE:
-        send_unicode_string(" ")
-    elif sep_vk in (VK_RETURN, VK_TAB):
-        time.sleep(0.005)
-        send_key(sep_vk)
+    _send_sep(sep_vk, sep_shifted)
     time.sleep(0.02)
     set_foreground_layout(target_layout)
     typed_scans.clear()
 
 
-def _send_sep(sep_vk: int):
-    """Відправляє роздільник після скоригованого слова."""
-    if sep_vk == VK_SPACE:
-        send_unicode_string(" ")
-    elif sep_vk in (VK_RETURN, VK_TAB):
-        time.sleep(0.005)
-        send_key(sep_vk)
-
-
 def _do_replace_batch(pending: list, cur_len: int, cur_converted: str,
-                      cur_target: int, cur_sep_vk: int):
+                      cur_target: int, cur_sep_vk: int, cur_sep_shifted: bool = False):
     """
     Пакетне виправлення: pending (старі відкладені слова) + поточне слово.
-    pending: список (orig_len, converted, target_layout, sep_vk) від найстарішого до найновішого.
-    Курсор стоїть після cur_sep (поточний роздільник вже на екрані).
+    pending: список (orig_len, converted, target_layout, sep_vk, sep_shifted)
+    від найстарішого до найновішого. Курсор стоїть після cur_sep.
     """
-    cur_sep_len = 1 if cur_sep_vk in WORD_BREAK_VKS else 0
-    total_bs = cur_sep_len + cur_len
-    for orig_len, _, _, psep_vk in pending:
-        total_bs += orig_len + (1 if psep_vk in WORD_BREAK_VKS else 0)
+    total_bs = _sep_len(cur_sep_vk) + cur_len
+    for orig_len, _, _, psep_vk, _ in pending:
+        total_bs += orig_len + _sep_len(psep_vk)
 
     send_backspaces(total_bs)
     time.sleep(0.02)
 
-    for _, pconverted, _, psep_vk in pending:
+    for _, pconverted, _, psep_vk, psep_shifted in pending:
         send_unicode_string(pconverted)
-        _send_sep(psep_vk)
+        _send_sep(psep_vk, psep_shifted)
 
     send_unicode_string(cur_converted)
-    _send_sep(cur_sep_vk)
+    _send_sep(cur_sep_vk, cur_sep_shifted)
 
     time.sleep(0.02)
     set_foreground_layout(cur_target)
@@ -1052,16 +1111,15 @@ def _undo_autocorrect():
     info = _last_autocorrect
     if not info:
         return
-    orig_scans, from_layout, to_layout, converted, sep_vk = info
+    orig_scans, from_layout, to_layout, converted, sep_vk, sep_shifted = info
     orig_text = (scans_to_ukr(orig_scans) if from_layout == LANG_UKRAINIAN
                  else scans_to_eng(orig_scans))
-    sep_len = 1 if sep_vk in WORD_BREAK_VKS else 0
     _dbg("undo autocorrect: %r -> back to %r (from=%04x)"
          % (converted, orig_text, from_layout))
-    send_backspaces(len(converted) + sep_len)
+    send_backspaces(len(converted) + _sep_len(sep_vk))
     time.sleep(0.02)
     send_unicode_string(orig_text)
-    _send_sep(sep_vk)
+    _send_sep(sep_vk, sep_shifted)
     time.sleep(0.02)
     set_foreground_layout(from_layout)
     typed_scans.clear()
@@ -1119,8 +1177,10 @@ def manual_convert():
         _release_correction()
 
 
-def auto_correct_word(scans, layout: int, sep_vk: int, seq0: int):
-    """Автокорекція на межі слова. seq0 — лічильник вводу на момент межі слова."""
+def auto_correct_word(scans, layout: int, sep_vk: int, seq0: int, sep_shifted: bool = False):
+    """Автокорекція на межі слова. seq0 — лічильник вводу на момент межі слова.
+    sep_vk — роздільник (пробіл/Enter/Tab або пунктуація-термінатор);
+    sep_shifted — чи був Shift для пунктуації (для точного відтворення символу)."""
     global _pending_corrections, _last_autocorrect, _autocorrect_undo_available
     if not _acquire_correction():
         return
@@ -1141,7 +1201,7 @@ def auto_correct_word(scans, layout: int, sep_vk: int, seq0: int):
             # Користувач продовжив друк.
             if converted:
                 # Поточне слово теж неправильне — зберігаємо у відкладені.
-                _pending_corrections.append((len(scans), converted, target_layout, sep_vk))
+                _pending_corrections.append((len(scans), converted, target_layout, sep_vk, sep_shifted))
                 _dbg("autocorrect: відкладено (pending=%d)" % len(_pending_corrections))
             else:
                 # Поточне слово правильне — відкладені не можемо безпечно застосувати
@@ -1149,7 +1209,7 @@ def auto_correct_word(scans, layout: int, sep_vk: int, seq0: int):
                 _pending_corrections.clear()
             return
 
-        sep_len = 1 if sep_vk in WORD_BREAK_VKS else 0
+        sep_len = _sep_len(sep_vk)
         pending = list(_pending_corrections)
         _pending_corrections.clear()
 
@@ -1162,26 +1222,26 @@ def auto_correct_word(scans, layout: int, sep_vk: int, seq0: int):
             # а поточне слово передруковуємо без змін.
             cur_text = scans_to_ukr(scans) if layout == LANG_UKRAINIAN else scans_to_eng(scans)
             total_bs = sep_len + len(scans)
-            for orig_len, _, _, psep_vk in pending:
-                total_bs += orig_len + (1 if psep_vk in WORD_BREAK_VKS else 0)
+            for orig_len, _, _, psep_vk, _ in pending:
+                total_bs += orig_len + _sep_len(psep_vk)
             send_backspaces(total_bs)
             time.sleep(0.02)
-            for _, pconverted, _, psep_vk in pending:
+            for _, pconverted, _, psep_vk, psep_shifted in pending:
                 send_unicode_string(pconverted)
-                _send_sep(psep_vk)
+                _send_sep(psep_vk, psep_shifted)
             send_unicode_string(cur_text)
-            _send_sep(sep_vk)
+            _send_sep(sep_vk, sep_shifted)
             time.sleep(0.02)
             typed_scans.clear()
             _clear_autocorrect_undo()
         elif pending:
-            _do_replace_batch(pending, len(scans), converted, target_layout, sep_vk)
+            _do_replace_batch(pending, len(scans), converted, target_layout, sep_vk, sep_shifted)
             _clear_autocorrect_undo()   # пакет складно відкочувати — не пропонуємо
         else:
-            _do_replace(len(scans) + sep_len, converted, target_layout, sep_vk)
+            _do_replace(len(scans) + sep_len, converted, target_layout, sep_vk, sep_shifted)
             # Одиночна автокорекція — дозволяємо відкат подвійним Ctrl (пам'ять винятків).
             if learning_enabled:
-                _last_autocorrect = (list(scans), layout, target_layout, converted, sep_vk)
+                _last_autocorrect = (list(scans), layout, target_layout, converted, sep_vk, sep_shifted)
                 _autocorrect_undo_available = True
             else:
                 _clear_autocorrect_undo()
@@ -1300,7 +1360,24 @@ def keyboard_hook(nCode, wParam, lParam):
             del typed_scans[:-50]
         _phrase_add_letter(sc, shifted)
     else:
-        # Цифра / пунктуація поза літерними позиціями / OEM — межа слова
+        # Цифра / пунктуація поза літерними позиціями / OEM — межа слова.
+        # Пунктуація-термінатор (напр. «так?») теж має запускати автокорекцію
+        # на щойно набраному слові — інакше слово перед пунктуацією без пробілу
+        # ніколи не перевіряється. Символ пунктуації вже зʼявиться на екрані,
+        # тож корекція відтворить його назад (з Shift), як роздільник.
+        term_shifted = bool(user32.GetKeyState(VK_SHIFT) & 0x8000)
+        if (enabled and auto_correct_enabled and typed_scans
+                and is_word_terminator(vk, term_shifted)):
+            scans  = list(typed_scans)
+            layout = current_layout()
+            if DEBUG:
+                _dbg("punct-break: vk=0x%02x shifted=%s scans=%d layout=%04x"
+                     % (vk, term_shifted, len(scans), layout))
+            threading.Thread(
+                target=auto_correct_word,
+                args=(scans, layout, vk, _input_seq, term_shifted), daemon=True
+            ).start()
+        # Пунктуація — межа для ручної фрази (як просив користувач).
         typed_scans.clear()
         phrase_tokens.clear()
 
