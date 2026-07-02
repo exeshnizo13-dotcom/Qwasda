@@ -3,8 +3,11 @@ Qwasda — перемикач розкладки клавіатури (EN ↔ UK
 
 Ручне перемикання:
   Подвійне натискання Ctrl (два Ctrl поспіль без іншої клавіші між ними) —
-  поточне слово конвертується між розкладками. Спрацьовує на відпусканні
-  другого Ctrl, щоб виправлення не склалось у Ctrl-хоткей.
+  конвертує ВЕСЬ щойно набраний текст (усі слова, набрані не в тій розкладці,
+  а не лише останнє). Спрацьовує на відпусканні другого Ctrl, щоб виправлення
+  не склалось у Ctrl-хоткей.
+  Якщо буфер порожній, а щойно спрацювала автокорекція — подвійний Ctrl
+  відкочує її (юзеру вона не була потрібна).
 
 Автокорекція (за словниками uk/en):
   На межі слова (пробіл/Enter/Tab) програма перевіряє набране слово:
@@ -12,6 +15,12 @@ Qwasda — перемикач розкладки клавіатури (EN ↔ UK
     • якщо слово невалідне, але його конвертація в іншу розкладку дає
       валідне слово з протилежного словника — виправляє розкладку.
   Словники лежать у data/words_en.txt.gz та data/words_uk.txt.gz.
+
+Пам'ять (навчання, learned.json):
+  • Ручне перемикання слова, якого автокорекція не чіпала → слово вивчається,
+    щоб надалі перемикатись автоматично (FORCE_*).
+  • Відкат автокорекції подвійним Ctrl → слово стає винятком (BLOCK_*),
+    і надалі автокорекція його не чіпає.
 
 Критичні особливості реалізації:
   1. LLKHF_INJECTED — ігноруємо власні SendInput-події
@@ -36,7 +45,7 @@ import atexit
 import signal
 import threading
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 try:
     import pystray
@@ -496,6 +505,16 @@ DICT_EN: frozenset = frozenset()
 DICT_UK = SortedWordIndex(b"")
 dicts_loaded = False
 
+# ── Вивчені користувачем слова (персистентні, learned.json) ─────────────────
+# FORCE_* — слова, які автокорекція має ПРИМУСОВО виправляти, навіть якщо їх
+#           нема у словнику (юзер сам перемкнув, бо авто не спрацювало).
+# BLOCK_* — слова-винятки, які автокорекція НЕ має чіпати (юзер відкотив
+#           небажане автовиправлення). Усі — у нижньому регістрі.
+FORCE_EN: set = set()   # укр.-набране, що треба перемикати в EN
+FORCE_UK: set = set()   # лат.-набране, що треба перемикати в UK
+BLOCK_UK: set = set()   # укр. слова, які лишати як є (не робити з них EN)
+BLOCK_EN: set = set()   # англ. слова, які лишати як є (не робити з них UK)
+
 
 def _resource(name: str) -> str:
     base = getattr(sys, "_MEIPASS",
@@ -592,27 +611,111 @@ def autocorrect_target(scans, layout: int):
     ukr_l, eng_l = ukr.lower(), eng.lower()
 
     if layout == LANG_UKRAINIAN:
-        # На екрані зараз ukr. Якщо це валідне укр. слово — не чіпаємо.
-        if ukr_l in DICT_UK:
+        # На екрані зараз ukr.
+        if ukr_l in BLOCK_UK:            # юзер відкотив це виправлення — не чіпаємо
             return None, None
-        if eng_l in DICT_EN:             # але в англ. читанні — валідне слово
+        if ukr_l in DICT_UK:             # валідне укр. слово — не чіпаємо
+            return None, None
+        # В англ. читанні — валідне слово АБО вивчене користувачем.
+        if eng_l in DICT_EN or eng_l in FORCE_EN:
             return eng, LANG_ENGLISH
     else:
         # На екрані зараз eng (латинська розкладка).
+        if eng_l in BLOCK_EN:            # юзер відкотив це виправлення — не чіпаємо
+            return None, None
         if eng_l in DICT_EN:
             return None, None
-        # EN→UK: суворіший поріг довжини проти випадкових збігів.
-        if len(scans) >= MIN_EN_TO_UK and ukr_l in DICT_UK:
+        # Вивчене слово перемикаємо без огляду на поріг довжини; словникове —
+        # лише з суворішим порогом MIN_EN_TO_UK проти випадкових збігів.
+        if ukr_l in FORCE_UK or (len(scans) >= MIN_EN_TO_UK and ukr_l in DICT_UK):
             return ukr, LANG_UKRAINIAN
     return None, None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Ручне перемикання цілої фрази (кілька слів через межі слів)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# phrase_tokens — накопичена «фраза» для ручного перемикання подвійним Ctrl.
+# Токен: ['w', [(scan, shifted), ...]] — слово (літерні scan-коди)
+#        ['s', vk]                     — роздільник (пробіл/Enter/Tab)
+# На відміну від typed_scans (лише поточне слово), фраза переживає межі слів,
+# тож подвійний Ctrl перемикає ВЕСЬ попередній текст, набраний не в тій
+# розкладці, а не лише останнє слово. Очищається, щойно спрацьовує
+# автокорекція (тоді текст уже «осів» правильно й переконвертувати його цілим
+# було б хибно), а також на навігації/пунктуації/хоткеях.
+
+
+def convert_phrase(phrase, layout: int):
+    """
+    Ручне перемикання фрази: кожне слово читається в ІНШІЙ розкладці,
+    роздільники лишаються як є. Повертає (segments, strip_len, target_layout)
+    або (None, 0, None), якщо конвертувати нічого.
+
+    segments — послідовність ('text', str) та ('sep', vk) для передруку;
+    strip_len — скільки видимих символів стерти (слова + роздільники).
+    """
+    if not phrase or layout not in (LANG_UKRAINIAN, LANG_ENGLISH):
+        return None, 0, None
+    to_eng = layout == LANG_UKRAINIAN
+    target = LANG_ENGLISH if to_eng else LANG_UKRAINIAN
+    segments = []
+    strip_len = 0
+    has_word = False
+    for tok in phrase:
+        if tok[0] == "w":
+            if not tok[1]:
+                continue
+            text = scans_to_eng(tok[1]) if to_eng else scans_to_ukr(tok[1])
+            segments.append(("text", text))
+            strip_len += len(tok[1])
+            has_word = True
+        else:  # роздільник
+            segments.append(("sep", tok[1]))
+            strip_len += 1
+    if not has_word:
+        return None, 0, None
+    return segments, strip_len, target
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Пам'ять: вивчання слів та винятків (learned.json)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def learn_valid_word(word_l: str, target_layout: int) -> bool:
+    """Запам'ятати слово як валідне для мови (щоб автокорекція перемикала його).
+    Повертає True, якщо множина змінилась."""
+    tgt = FORCE_EN if target_layout == LANG_ENGLISH else FORCE_UK
+    if word_l in tgt:
+        return False
+    tgt.add(word_l)
+    return True
+
+
+def learn_block_word(word_l: str, layout: int) -> bool:
+    """Запам'ятати слово як виняток (автокорекція не має його чіпати).
+    layout — мова, в якій слово має ЛИШИТИСЬ. Повертає True, якщо змінилось."""
+    tgt = BLOCK_UK if layout == LANG_UKRAINIAN else BLOCK_EN
+    if word_l in tgt:
+        return False
+    tgt.add(word_l)
+    return True
+
+
+def forget_learned():
+    """Очистити всю вивчену пам'ять."""
+    for s in (FORCE_EN, FORCE_UK, BLOCK_UK, BLOCK_EN):
+        s.clear()
+    save_learned()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Конфігурація (персистентна, %APPDATA%\Qwasda\config.json)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-APP_DIR     = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "Qwasda")
-CONFIG_PATH = os.path.join(APP_DIR, "config.json")
+APP_DIR      = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "Qwasda")
+CONFIG_PATH  = os.path.join(APP_DIR, "config.json")
+LEARNED_PATH = os.path.join(APP_DIR, "learned.json")
 
 # Ключі конфігу, що мапляться на однойменні (великими) глобальні змінні-пороги.
 _CONFIG_TUNABLES = ("MIN_AUTOCORRECT_LEN", "MIN_EN_TO_UK", "DOUBLE_TAP_WINDOW")
@@ -624,6 +727,7 @@ def _config_snapshot() -> dict:
     snap = {
         "enabled": enabled,
         "auto_correct_enabled": auto_correct_enabled,
+        "learning_enabled": learning_enabled,
     }
     for k in _CONFIG_TUNABLES:
         snap[k.lower()] = g[k]
@@ -632,7 +736,7 @@ def _config_snapshot() -> dict:
 
 def load_config():
     """Читає config.json і застосовує його до глобального стану (тихо, якщо файлу нема)."""
-    global enabled, auto_correct_enabled
+    global enabled, auto_correct_enabled, learning_enabled
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg = json.load(f)
@@ -644,6 +748,8 @@ def load_config():
         enabled = cfg["enabled"]
     if isinstance(cfg.get("auto_correct_enabled"), bool):
         auto_correct_enabled = cfg["auto_correct_enabled"]
+    if isinstance(cfg.get("learning_enabled"), bool):
+        learning_enabled = cfg["learning_enabled"]
     g = globals()
     for k in _CONFIG_TUNABLES:
         v = cfg.get(k.lower())
@@ -662,6 +768,43 @@ def save_config():
         os.replace(tmp, CONFIG_PATH)
     except OSError as e:
         _dbg("save_config failed: %s" % e)
+
+
+# Множини вивчених слів ↔ ключі у learned.json.
+_LEARNED_SETS = ("FORCE_EN", "FORCE_UK", "BLOCK_UK", "BLOCK_EN")
+
+
+def load_learned():
+    """Читає learned.json у множини FORCE_*/BLOCK_* (тихо, якщо файлу нема)."""
+    try:
+        with open(LEARNED_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    g = globals()
+    for k in _LEARNED_SETS:
+        vals = data.get(k.lower())
+        if isinstance(vals, list):
+            g[k].clear()
+            g[k].update(str(w).lower() for w in vals if isinstance(w, str) and w)
+    _dbg("learned loaded: force_en=%d force_uk=%d block_uk=%d block_en=%d"
+         % (len(FORCE_EN), len(FORCE_UK), len(BLOCK_UK), len(BLOCK_EN)))
+
+
+def save_learned():
+    """Атомарно зберігає вивчені слова у learned.json (помилки не фатальні)."""
+    try:
+        os.makedirs(APP_DIR, exist_ok=True)
+        g = globals()
+        data = {k.lower(): sorted(g[k]) for k in _LEARNED_SETS}
+        tmp = LEARNED_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, LEARNED_PATH)
+    except OSError as e:
+        _dbg("save_learned failed: %s" % e)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -718,10 +861,12 @@ class DoubleTapDetector:
 running              = True
 enabled              = True
 auto_correct_enabled = True
+learning_enabled     = True        # запам'ятовувати ручні перемикання (пам'ять)
 tray_icon            = None
 ctrl_tap             = DoubleTapDetector()
 
 typed_scans       = []     # Буфер поточного слова — scan-коди клавіш (не символи)
+phrase_tokens     = []     # Буфер фрази для перемикання всього тексту (див. convert_phrase)
 hook_handle       = None
 main_thread_id    = 0
 
@@ -734,6 +879,11 @@ _correcting   = False
 _correct_lock = threading.Lock()   # серіалізує заміни (одна за раз)
 _input_seq    = 0                  # лічильник реальних натискань (для скасування гонки)
 _pending_corrections = []          # (orig_len, converted, target_layout, sep_vk) — відкладені виправлення
+
+# Остання автокорекція, яку можна відкотити подвійним Ctrl (для пам'яті винятків).
+# (orig_scans, from_layout, to_layout, converted_text, sep_vk) або None.
+_last_autocorrect          = None
+_autocorrect_undo_available = False   # True одразу після автокорекції, поки юзер не друкує далі
 
 
 def current_layout(force: bool = False) -> int:
@@ -824,28 +974,154 @@ def _release_correction():
     _correct_lock.release()
 
 
+# ── Буфер фрази (phrase_tokens) — підтримка з hook-потоку ────────────────────
+
+def _phrase_add_letter(sc: int, shifted: bool):
+    """Додати літеру до поточного слова фрази (створивши слово, якщо треба)."""
+    if phrase_tokens and phrase_tokens[-1][0] == "w":
+        phrase_tokens[-1][1].append((sc, shifted))
+    else:
+        phrase_tokens.append(["w", [(sc, shifted)]])
+    if len(phrase_tokens) > 400:       # м'який запобіжник від безмежного росту
+        del phrase_tokens[:200]
+
+
+def _phrase_add_sep(vk: int):
+    """Додати роздільник (пробіл/Enter/Tab). Провідні роздільники ігноруємо."""
+    if phrase_tokens:
+        phrase_tokens.append(["s", vk])
+
+
+def _phrase_backspace():
+    """Синхронізувати фразу з Backspace: прибрати останній символ."""
+    if not phrase_tokens:
+        return
+    last = phrase_tokens[-1]
+    if last[0] == "w":
+        if last[1]:
+            last[1].pop()
+        if not last[1]:
+            phrase_tokens.pop()
+    else:                              # роздільник
+        phrase_tokens.pop()
+
+
+# ── Пам'ять: undo автокорекції ───────────────────────────────────────────────
+
+def _clear_autocorrect_undo():
+    global _autocorrect_undo_available, _last_autocorrect
+    _autocorrect_undo_available = False
+    _last_autocorrect = None
+
+
+def _learn_from_phrase(phrase, layout: int, target: int):
+    """
+    Вивчити слова фрази, яку юзер сам перемкнув (авто не спрацювало). Вчимо
+    лише ті слова, чиє джерельне читання НЕ є валідним словом поточної мови —
+    тобто справді набрані не в тій розкладці (щоб не засмічувати пам'ять).
+    """
+    changed = False
+    for tok in phrase:
+        if tok[0] != "w" or len(tok[1]) < MIN_AUTOCORRECT_LEN:
+            continue
+        if layout == LANG_UKRAINIAN:
+            src_l = scans_to_ukr(tok[1]).lower()
+            tgt_l = scans_to_eng(tok[1]).lower()
+            if dicts_loaded and src_l in DICT_UK:   # реальне укр. слово — не вчимо
+                continue
+        else:
+            src_l = scans_to_eng(tok[1]).lower()
+            tgt_l = scans_to_ukr(tok[1]).lower()
+            if dicts_loaded and src_l in DICT_EN:   # реальне англ. слово — не вчимо
+                continue
+        if not tgt_l.isalpha():
+            continue
+        if learn_valid_word(tgt_l, target):
+            changed = True
+    if changed:
+        save_learned()
+        _dbg("learned valid: force_en=%d force_uk=%d" % (len(FORCE_EN), len(FORCE_UK)))
+
+
+def _undo_autocorrect():
+    """
+    Відкат щойно зробленої автокорекції (юзеру вона не була потрібна).
+    Повертає оригінал, перемикає розкладку назад і запам'ятовує слово як
+    виняток, щоб надалі його не чіпати. Викликати під _acquire_correction().
+    """
+    info = _last_autocorrect
+    if not info:
+        return
+    orig_scans, from_layout, to_layout, converted, sep_vk = info
+    orig_text = (scans_to_ukr(orig_scans) if from_layout == LANG_UKRAINIAN
+                 else scans_to_eng(orig_scans))
+    sep_len = 1 if sep_vk in WORD_BREAK_VKS else 0
+    _dbg("undo autocorrect: %r -> back to %r (from=%04x)"
+         % (converted, orig_text, from_layout))
+    send_backspaces(len(converted) + sep_len)
+    time.sleep(0.02)
+    send_unicode_string(orig_text)
+    _send_sep(sep_vk)
+    time.sleep(0.02)
+    set_foreground_layout(from_layout)
+    typed_scans.clear()
+    phrase_tokens.clear()
+    if learning_enabled and learn_block_word(orig_text.lower(), from_layout):
+        save_learned()
+        _dbg("learned block: block_uk=%d block_en=%d" % (len(BLOCK_UK), len(BLOCK_EN)))
+    _clear_autocorrect_undo()
+
+
+def _do_replace_phrase(segments, strip_len: int, target_layout: int):
+    """Стерти strip_len символів і передрукувати фразу посегментно, тоді перемкнути."""
+    send_backspaces(strip_len)
+    time.sleep(0.02)
+    for kind, val in segments:
+        if kind == "text":
+            send_unicode_string(val)
+        else:                          # роздільник
+            _send_sep(val)
+    time.sleep(0.02)
+    set_foreground_layout(target_layout)
+
+
 def manual_convert():
-    """Ручне перемикання — подвійний Ctrl. Конвертує поточне слово."""
+    """
+    Ручне перемикання — подвійний Ctrl.
+      • Є набрана фраза → конвертуємо ВЕСЬ текст (усі слова, що досі набрані
+        не в тій розкладці) і за потреби вивчаємо їх у пам'ять.
+      • Буфер порожній, але щойно спрацювала автокорекція → відкочуємо її
+        (юзеру вона була не потрібна) і запам'ятовуємо слово як виняток.
+    """
     if not _acquire_correction():
         return
     try:
-        scans = list(typed_scans)
-        if not scans:
+        phrase = [tok for tok in phrase_tokens]
+        has_word = any(t[0] == "w" and t[1] for t in phrase)
+        if has_word:
+            layout = current_layout(force=True)   # свіже: юзер міг щойно перемкнути вручну
+            segments, strip_len, target = convert_phrase(phrase, layout)
+            _dbg("manual_convert: tokens=%d layout=%04x strip=%d target=%s"
+                 % (len(phrase), layout, strip_len, target))
+            if not segments:
+                return
+            _do_replace_phrase(segments, strip_len, target)
+            typed_scans.clear()
+            phrase_tokens.clear()
+            _clear_autocorrect_undo()
+            if learning_enabled:
+                _learn_from_phrase(phrase, layout, target)
             return
-        layout = current_layout(force=True)   # свіже читання: користувач міг щойно перемкнути вручну
-        converted, target_layout = manual_target(scans, layout)
-        _dbg("manual_convert: scans=%d layout=%04x -> conv=%r target=%s"
-             % (len(scans), layout, converted, target_layout))
-        if not converted:
-            return
-        _do_replace(len(scans), converted, target_layout)
+        # Буфер порожній — можливо, відкат щойно зробленої автокорекції.
+        if _autocorrect_undo_available and _last_autocorrect:
+            _undo_autocorrect()
     finally:
         _release_correction()
 
 
 def auto_correct_word(scans, layout: int, sep_vk: int, seq0: int):
     """Автокорекція на межі слова. seq0 — лічильник вводу на момент межі слова."""
-    global _pending_corrections
+    global _pending_corrections, _last_autocorrect, _autocorrect_undo_available
     if not _acquire_correction():
         return
     try:
@@ -877,6 +1153,10 @@ def auto_correct_word(scans, layout: int, sep_vk: int, seq0: int):
         pending = list(_pending_corrections)
         _pending_corrections.clear()
 
+        # Автокорекція «осідає» — фраза для ручного перемикання більше не
+        # відображає екран правильно; скидаємо її.
+        phrase_tokens.clear()
+
         if not converted:
             # Поточне слово правильне, але є відкладені — виправляємо їх,
             # а поточне слово передруковуємо без змін.
@@ -893,10 +1173,18 @@ def auto_correct_word(scans, layout: int, sep_vk: int, seq0: int):
             _send_sep(sep_vk)
             time.sleep(0.02)
             typed_scans.clear()
+            _clear_autocorrect_undo()
         elif pending:
             _do_replace_batch(pending, len(scans), converted, target_layout, sep_vk)
+            _clear_autocorrect_undo()   # пакет складно відкочувати — не пропонуємо
         else:
             _do_replace(len(scans) + sep_len, converted, target_layout, sep_vk)
+            # Одиночна автокорекція — дозволяємо відкат подвійним Ctrl (пам'ять винятків).
+            if learning_enabled:
+                _last_autocorrect = (list(scans), layout, target_layout, converted, sep_vk)
+                _autocorrect_undo_available = True
+            else:
+                _clear_autocorrect_undo()
     finally:
         _release_correction()
 
@@ -953,6 +1241,10 @@ def keyboard_hook(nCode, wParam, lParam):
     # ── Будь-яка інша клавіша «бруднить» поточний Ctrl-тап і рве ланцюг ──────
     ctrl_tap.on_other_key()
 
+    # Реальний друк (будь-яка не-Ctrl клавіша) знімає можливість відкотити
+    # автокорекцію: подвійний Ctrl тепер стосуватиметься нового тексту, не її.
+    _clear_autocorrect_undo()
+
     # ── Інші модифікатори (Shift/Alt/Win/Caps) — далі не обробляємо ──────────
     if vk in MODIFIER_VKS:
         return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
@@ -960,6 +1252,7 @@ def keyboard_hook(nCode, wParam, lParam):
     # ── Ctrl / Alt / Win утиснуто — не чіпаємо хоткеї ───────────────────────
     if any_modifier_down():
         typed_scans.clear()
+        phrase_tokens.clear()
         _pending_corrections.clear()
         return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
@@ -970,12 +1263,14 @@ def keyboard_hook(nCode, wParam, lParam):
     if vk == VK_BACK:
         if typed_scans:
             typed_scans.pop()
+        _phrase_backspace()
         _pending_corrections.clear()
         return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
     # ── Навігація — скидаємо буфер (курсор перемістився) ────────────────────
     if vk in NAV_CLEAR_VKS:
         typed_scans.clear()
+        phrase_tokens.clear()
         _pending_corrections.clear()
         return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
@@ -991,6 +1286,7 @@ def keyboard_hook(nCode, wParam, lParam):
                 target=auto_correct_word,
                 args=(scans, layout, vk, _input_seq), daemon=True
             ).start()
+        _phrase_add_sep(vk)            # роздільник лишається у фразі для ручного перемикання
         typed_scans.clear()
         return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
@@ -1002,9 +1298,11 @@ def keyboard_hook(nCode, wParam, lParam):
         typed_scans.append((sc, shifted))
         if len(typed_scans) > 100:
             del typed_scans[:-50]
+        _phrase_add_letter(sc, shifted)
     else:
         # Цифра / пунктуація поза літерними позиціями / OEM — межа слова
         typed_scans.clear()
+        phrase_tokens.clear()
 
     return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
@@ -1069,6 +1367,32 @@ def _toggle_auto(icon, item):
     icon.update_menu()
 
 
+def _toggle_learning(icon, item):
+    global learning_enabled
+    learning_enabled = not learning_enabled
+    if not learning_enabled:
+        _clear_autocorrect_undo()
+    save_config()
+    icon.update_menu()
+
+
+def _forget_learned(icon, item):
+    total = len(FORCE_EN) + len(FORCE_UK) + len(BLOCK_UK) + len(BLOCK_EN)
+    if total == 0:
+        return
+    # MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 (за замовч. — «Ні»)
+    resp = user32.MessageBoxW(
+        None,
+        "Забути всі вивчені слова (%d)?\nЦю дію не можна скасувати." % total,
+        "Qwasda — забути вивчене", 0x04 | 0x20 | 0x100,
+    )
+    if resp != 6:            # IDYES
+        return
+    forget_learned()
+    icon.notify("Пам'ять очищено — вивчені слова забуто.", "Qwasda")
+    icon.update_menu()
+
+
 def _toggle_startup(icon, item):
     remove_from_startup() if is_in_startup() else add_to_startup()
     icon.update_menu()
@@ -1097,6 +1421,15 @@ def _make_menu():
                       + ("" if dicts_loaded else " (словники не завантажено)"),
             _toggle_auto, checked=lambda i: auto_correct_enabled,
             enabled=lambda i: dicts_loaded,
+        ),
+        pystray.MenuItem(
+            lambda i: "🧠 Навчання: ON" if learning_enabled else "🧠 Навчання: OFF",
+            _toggle_learning, checked=lambda i: learning_enabled,
+        ),
+        pystray.MenuItem(
+            lambda i: "🧹 Забути вивчене (%d)"
+                      % (len(FORCE_EN) + len(FORCE_UK) + len(BLOCK_UK) + len(BLOCK_EN)),
+            _forget_learned,
         ),
         pystray.MenuItem(
             lambda i: "✅ Автозапуск" if is_in_startup() else "❌ Автозапуск",
@@ -1148,6 +1481,7 @@ def main():
         sys.exit(0)
 
     load_config()
+    load_learned()
 
     main_thread_id = kernel32.GetCurrentThreadId()
     _dbg("=== Qwasda v%s start === frozen=%s debug_log=%s"

@@ -21,8 +21,13 @@ from qwasda import (  # noqa: E402
     scans_to_eng,
     manual_target,
     autocorrect_target,
+    convert_phrase,
+    learn_valid_word,
+    learn_block_word,
     LANG_UKRAINIAN,
     LANG_ENGLISH,
+    VK_SPACE,
+    VK_RETURN,
 )
 
 # Зворотна мапа «англ. літера → scan-код», щоб будувати буфери з рядків.
@@ -37,6 +42,16 @@ def scans(eng_word: str, caps=None):
     if caps is None:
         caps = [False] * len(eng_word)
     return [(_ENG_TO_SCAN[c], caps[i]) for i, c in enumerate(eng_word)]
+
+
+def wtok(eng_word: str, caps=None):
+    """Токен-слово для phrase_tokens."""
+    return ["w", scans(eng_word, caps)]
+
+
+def stok(vk=VK_SPACE):
+    """Токен-роздільник для phrase_tokens."""
+    return ["s", vk]
 
 
 # ───────────────────────── Конвертація розкладок ──────────────────────────
@@ -309,3 +324,143 @@ def test_load_config_rejects_bad_types(cfg_path, monkeypatch):
     qwasda.load_config()
     assert qwasda.enabled is True         # рядок замість bool — проігноровано
     assert qwasda.MIN_EN_TO_UK == 3       # від'ємне число — проігноровано
+
+
+# ───────────────────────── Перемикання цілої фрази ────────────────────────
+
+def test_convert_phrase_en_to_uk_multiword():
+    # «ghbdsn ghbdsn» (EN) → дві «привіт» через пробіл, перемикання в UK.
+    phrase = [wtok("ghbdsn"), stok(VK_SPACE), wtok("ghbdsn")]
+    segments, strip_len, target = convert_phrase(phrase, LANG_ENGLISH)
+    assert target == LANG_UKRAINIAN
+    assert strip_len == 6 + 1 + 6
+    assert segments == [("text", "привіт"), ("sep", VK_SPACE), ("text", "привіт")]
+
+
+def test_convert_phrase_uk_to_en_single():
+    phrase = [wtok("ghbdsn")]
+    segments, strip_len, target = convert_phrase(phrase, LANG_UKRAINIAN)
+    assert target == LANG_ENGLISH
+    assert strip_len == 6
+    assert segments == [("text", "ghbdsn")]
+
+
+def test_convert_phrase_preserves_case_and_newline():
+    caps = [True] + [False] * 4
+    phrase = [wtok("hello", caps), stok(VK_RETURN), wtok("cat")]
+    segments, strip_len, target = convert_phrase(phrase, LANG_ENGLISH)
+    assert segments[0] == ("text", "Руддщ")     # регістр збережено
+    assert segments[1] == ("sep", VK_RETURN)     # Enter лишається роздільником
+    assert strip_len == 5 + 1 + 3
+
+
+def test_convert_phrase_no_words_returns_none():
+    assert convert_phrase([stok(VK_SPACE)], LANG_ENGLISH) == (None, 0, None)
+    assert convert_phrase([], LANG_ENGLISH) == (None, 0, None)
+
+
+def test_convert_phrase_ignores_other_layouts():
+    assert convert_phrase([wtok("ghbdsn")], 0x0419) == (None, 0, None)
+
+
+# ───────────────────────── Пам'ять: FORCE / BLOCK ─────────────────────────
+
+@pytest.fixture
+def learned(monkeypatch):
+    """Свіжі (порожні) множини вивчених слів для кожного тесту."""
+    fe, fu, bu, be = set(), set(), set(), set()
+    monkeypatch.setattr(qwasda, "FORCE_EN", fe)
+    monkeypatch.setattr(qwasda, "FORCE_UK", fu)
+    monkeypatch.setattr(qwasda, "BLOCK_UK", bu)
+    monkeypatch.setattr(qwasda, "BLOCK_EN", be)
+    return fe, fu, bu, be
+
+
+def test_force_en_enables_autocorrect(dicts, learned):
+    # «qwert» (UK-набране) не в жодному словнику → без пам'яті не чіпається.
+    assert autocorrect_target(scans("qwert"), LANG_UKRAINIAN) == (None, None)
+    # Але вивчене як валідне EN → перемикається в англійську.
+    qwasda.FORCE_EN.add("qwert")
+    assert autocorrect_target(scans("qwert"), LANG_UKRAINIAN) == ("qwert", LANG_ENGLISH)
+
+
+def test_force_uk_bypasses_len_threshold(dicts, learned, monkeypatch):
+    monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 7)   # звичайні слова не пройшли б
+    qwasda.FORCE_UK.add("ко")                        # укр. читання «rj»
+    conv, target = autocorrect_target(scans("rj"), LANG_ENGLISH)
+    assert conv == "ко"
+    assert target == LANG_UKRAINIAN
+
+
+def test_block_uk_prevents_autocorrect(dicts, learned):
+    # «руддщ» (UK) звично перемкнулось би в «hello» (валідне EN).
+    assert autocorrect_target(scans("hello"), LANG_UKRAINIAN) == ("hello", LANG_ENGLISH)
+    qwasda.BLOCK_UK.add("руддщ")
+    assert autocorrect_target(scans("hello"), LANG_UKRAINIAN) == (None, None)
+
+
+def test_block_en_prevents_autocorrect(dicts, learned):
+    # «ghbdsn» (EN) звично перемкнулось би в «привіт» (валідне UK).
+    assert autocorrect_target(scans("ghbdsn"), LANG_ENGLISH) == ("привіт", LANG_UKRAINIAN)
+    qwasda.BLOCK_EN.add("ghbdsn")
+    assert autocorrect_target(scans("ghbdsn"), LANG_ENGLISH) == (None, None)
+
+
+def test_learn_valid_word_dedupes(learned):
+    fe = qwasda.FORCE_EN
+    assert learn_valid_word("qwert", LANG_ENGLISH) is True
+    assert learn_valid_word("qwert", LANG_ENGLISH) is False   # повтор — без змін
+    assert "qwert" in fe
+    assert learn_valid_word("привіт", LANG_UKRAINIAN) is True
+    assert "привіт" in qwasda.FORCE_UK
+
+
+def test_learn_block_word_targets_right_set(learned):
+    assert learn_block_word("руддщ", LANG_UKRAINIAN) is True
+    assert "руддщ" in qwasda.BLOCK_UK
+    assert learn_block_word("ghbdsn", LANG_ENGLISH) is True
+    assert "ghbdsn" in qwasda.BLOCK_EN
+
+
+# ───────────────────────── Пам'ять: персистентність ───────────────────────
+
+@pytest.fixture
+def learned_path(tmp_path, monkeypatch):
+    p = tmp_path / "learned.json"
+    monkeypatch.setattr(qwasda, "APP_DIR", str(tmp_path))
+    monkeypatch.setattr(qwasda, "LEARNED_PATH", str(p))
+    return p
+
+
+def test_learned_round_trip(learned, learned_path):
+    qwasda.FORCE_EN.update({"qwert", "asdf"})
+    qwasda.BLOCK_EN.add("ghbdsn")
+    qwasda.save_learned()
+    # «забуваємо» в пам'яті, тоді читаємо з файлу
+    qwasda.FORCE_EN.clear()
+    qwasda.BLOCK_EN.clear()
+    qwasda.load_learned()
+    assert qwasda.FORCE_EN == {"qwert", "asdf"}
+    assert qwasda.BLOCK_EN == {"ghbdsn"}
+
+
+def test_load_learned_missing_file_is_noop(learned, learned_path):
+    qwasda.FORCE_EN.add("keep")
+    qwasda.load_learned()                 # файлу нема — нічого не падає
+    assert "keep" in qwasda.FORCE_EN
+
+
+def test_load_learned_ignores_garbage(learned, learned_path):
+    learned_path.write_text("{ not json", encoding="utf-8")
+    qwasda.FORCE_EN.add("keep")
+    qwasda.load_learned()
+    assert "keep" in qwasda.FORCE_EN
+
+
+def test_forget_learned_clears_all(learned, learned_path):
+    qwasda.FORCE_EN.add("qwert")
+    qwasda.BLOCK_UK.add("руддщ")
+    qwasda.forget_learned()
+    assert not qwasda.FORCE_EN
+    assert not qwasda.BLOCK_UK
+    assert learned_path.exists()          # порожня пам'ять збережена на диск
