@@ -45,7 +45,7 @@ import atexit
 import signal
 import threading
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
 try:
     import pystray
@@ -162,10 +162,17 @@ OEM_PUNCT_VKS = frozenset({
 # Пороги корекції та вікно подвійного тапу — значення за замовчуванням.
 # Перевизначаються з config.json (див. load_config) і доступні як глобальні
 # змінні, бо налаштовуються користувачем у рантаймі.
-MIN_AUTOCORRECT_LEN  = 2     # не виправляти надто короткі слова
+MIN_AUTOCORRECT_LEN  = 2     # не виправляти надто короткі слова (крім однолітерних зі списку)
 MIN_EN_TO_UK         = 3     # напрямок EN→UK суворіший: укр. словник величезний (3.8M),
                              # тож короткі латинські токени легко випадково «стають» укр.
 DOUBLE_TAP_WINDOW    = 0.4   # макс. пауза (с) між двома Ctrl, щоб вважати їх «подвійним»
+
+# Валідні ОДНОЛІТЕРНІ слова — щоб автокорекція перемикала «я»/«і»/«з» тощо,
+# набрані не в тій розкладці (напр. «я»→«z»), але НЕ чіпала кожну випадкову
+# літеру. Слово з однієї літери виправляється лише якщо його читання в іншій
+# розкладці є в цьому списку.
+UK_SINGLE_WORDS = frozenset("аійоуязєбжв")   # а і й о у я з є б ж в (укр. однолітерні)
+EN_SINGLE_WORDS = frozenset("ai")            # a, i
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Scan code → символ (фізична позиція → символ у розкладці)
@@ -639,13 +646,32 @@ def autocorrect_target(scans, layout: int):
     Працює лише коли активна UK або EN (рос. та інші не чіпаємо).
     Повертає (converted, target_layout) або (None, None).
     """
-    if not dicts_loaded or len(scans) < MIN_AUTOCORRECT_LEN:
+    if not dicts_loaded or not scans:
         return None, None
     if layout not in (LANG_UKRAINIAN, LANG_ENGLISH):
         return None, None
     ukr = scans_to_ukr(scans)            # як слово виглядає в укр. розкладці (з регістром)
     eng = scans_to_eng(scans)            # ... і в англійській
     ukr_l, eng_l = ukr.lower(), eng.lower()
+
+    # Однолітерні слова — окремою гілкою: виправляємо лише валідні однолітерні
+    # слова (я, і, з, у, в, о, а, є, й / a, i), інакше кожна випадкова літера
+    # перемикалась би. Обходить загальний поріг MIN_AUTOCORRECT_LEN.
+    if len(scans) == 1:
+        if layout == LANG_UKRAINIAN:
+            if ukr_l in BLOCK_UK or ukr_l in UK_SINGLE_WORDS:
+                return None, None       # валідна укр. однолітерна / виняток — лишаємо
+            if eng_l in EN_SINGLE_WORDS or eng_l in FORCE_EN:
+                return eng, LANG_ENGLISH
+        else:
+            if eng_l in BLOCK_EN or eng_l in EN_SINGLE_WORDS:
+                return None, None
+            if ukr_l in UK_SINGLE_WORDS or ukr_l in FORCE_UK:
+                return ukr, LANG_UKRAINIAN
+        return None, None
+
+    if len(scans) < MIN_AUTOCORRECT_LEN:
+        return None, None
 
     if layout == LANG_UKRAINIAN:
         # На екрані зараз ukr.

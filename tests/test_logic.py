@@ -217,6 +217,37 @@ def test_autocorrect_ignores_other_layouts(dicts):
     assert autocorrect_target(scans("ghbdsn"), 0x0419) == (None, None)
 
 
+# ── Однолітерні слова (я, і, з … / a, i) ──
+
+def test_autocorrect_single_uk_letter_en_to_uk(dicts):
+    # «z» (EN) → «я» (валідне укр. однолітерне) → перемкнути в UK.
+    assert autocorrect_target(scans("z"), LANG_ENGLISH) == ("я", LANG_UKRAINIAN)
+    # «s» (EN) → «і».
+    assert autocorrect_target(scans("s"), LANG_ENGLISH) == ("і", LANG_UKRAINIAN)
+
+
+def test_autocorrect_single_preserves_case(dicts):
+    conv, target = autocorrect_target(scans("z", caps=[True]), LANG_ENGLISH)
+    assert conv == "Я"
+    assert target == LANG_UKRAINIAN
+
+
+def test_autocorrect_single_valid_en_letter_untouched(dicts):
+    # «a» та «i» — валідні англ. однолітерні, не чіпати.
+    assert autocorrect_target(scans("a"), LANG_ENGLISH) == (None, None)
+    assert autocorrect_target(scans("i"), LANG_ENGLISH) == (None, None)
+
+
+def test_autocorrect_single_random_letter_untouched(dicts):
+    # «h» (EN) → укр. «р» не є однолітерним словом → не чіпати.
+    assert autocorrect_target(scans("h"), LANG_ENGLISH) == (None, None)
+
+
+def test_autocorrect_single_valid_uk_letter_untouched(dicts):
+    # «я» набране в UK (клавіша «z») — валідне укр. однолітерне, лишити.
+    assert autocorrect_target(scans("z"), LANG_UKRAINIAN) == (None, None)
+
+
 # ───────────────────────── Подвійний Ctrl (DoubleTapDetector) ─────────────
 
 WIN = 0.4   # вікно подвійного тапу для тестів
