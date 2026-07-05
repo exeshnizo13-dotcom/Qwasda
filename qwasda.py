@@ -45,7 +45,7 @@ import atexit
 import signal
 import threading
 
-__version__ = "1.3.2"
+__version__ = "1.3.3"
 
 try:
     import pystray
@@ -947,6 +947,10 @@ phrase_tokens     = []     # Буфер фрази для перемикання
 hook_handle       = None
 main_thread_id    = 0
 
+# Активне вікно на момент попереднього натискання. Якщо змінилося — курсор/контекст
+# інші, а буфери (typed_scans/phrase_tokens) більше не відповідають екрану.
+_last_hwnd        = None
+
 # Кеш розкладки (LL-hook має повертатися швидко)
 _cached_layout      = LANG_ENGLISH
 _cached_layout_time = 0.0
@@ -961,6 +965,21 @@ _pending_corrections = []          # (orig_len, converted, target_layout, sep_vk
 # (orig_scans, from_layout, to_layout, converted_text, sep_vk) або None.
 _last_autocorrect          = None
 _autocorrect_undo_available = False   # True одразу після автокорекції, поки юзер не друкує далі
+
+
+def _foreground_changed() -> bool:
+    """
+    True, якщо активне вікно змінилося з моменту попереднього натискання.
+    Дешевий виклик (читає глобальний стан) — безпечно кликати в LL-hook на кожну
+    клавішу. Перший виклик (коли _last_hwnd is None) поверне True, але буфери тоді
+    порожні, тож скидання нешкідливе.
+    """
+    global _last_hwnd
+    hwnd = user32.GetForegroundWindow()
+    if hwnd != _last_hwnd:
+        _last_hwnd = hwnd
+        return True
+    return False
 
 
 def current_layout(force: bool = False) -> int:
@@ -1318,6 +1337,16 @@ def keyboard_hook(nCode, wParam, lParam):
     if _correcting:
         ctrl_tap.on_other_key()
         return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
+
+    # ── Зміна активного вікна — буфер більше не відповідає екрану, скидаємо ──
+    # (перемкнулись у інше вікно й повернулись; курсор/контекст уже інші).
+    # Alt+Tab ловиться нижче через модифікатор, але клік мишею по іншому вікну
+    # інакше лишив би застарілий хвіст слова, до якого допишеться новий ввід.
+    if _foreground_changed():
+        typed_scans.clear()
+        phrase_tokens.clear()
+        _pending_corrections.clear()
+        _clear_autocorrect_undo()
 
     # ── Ctrl — початок (потенційно чистого) тапу для подвійного натискання ───
     if vk in CTRL_VKS:
