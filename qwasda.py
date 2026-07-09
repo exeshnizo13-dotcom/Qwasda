@@ -45,7 +45,7 @@ import atexit
 import signal
 import threading
 
-__version__ = "1.3.3"
+__version__ = "1.3.4"
 
 try:
     import pystray
@@ -109,6 +109,11 @@ VK_LEFT     = 0x25
 VK_UP       = 0x26
 VK_RIGHT    = 0x27
 VK_DOWN     = 0x28
+VK_PRIOR    = 0x21  # Page Up
+VK_NEXT     = 0x22  # Page Down
+VK_END      = 0x23
+VK_HOME     = 0x24
+VK_DELETE   = 0x2E
 VK_LWIN     = 0x5B
 VK_RWIN     = 0x5C
 VK_LSHIFT   = 0xA0
@@ -120,6 +125,16 @@ VK_RMENU    = 0xA5
 
 # bit 4 у KBDLLHOOKSTRUCT.flags → подія ін'єктована (від нашого SendInput)
 LLKHF_INJECTED = 0x10
+
+# Mouse hook constants
+WH_KEYBOARD_LL = 13
+WH_MOUSE_LL    = 14
+WM_LBUTTONDOWN = 0x0201
+WM_RBUTTONDOWN = 0x0204
+WM_MBUTTONDOWN = 0x0207
+WM_XBUTTONDOWN = 0x020B
+_MOUSE_DOWN_MSGS = frozenset({WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN, WM_XBUTTONDOWN})
+LLMHF_INJECTED = 0x01  # Mouse event flags bit 0 → injected event
 
 KLF_ACTIVATE   = 0x00000001
 LANG_ENGLISH   = 0x0409
@@ -137,7 +152,8 @@ MODIFIER_VKS = frozenset({
 })
 
 WORD_BREAK_VKS = frozenset({VK_SPACE, VK_RETURN, VK_TAB})
-NAV_CLEAR_VKS  = frozenset({VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN, VK_ESCAPE})
+NAV_CLEAR_VKS  = frozenset({VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN, VK_ESCAPE,
+                             VK_HOME, VK_END, VK_PRIOR, VK_NEXT, VK_DELETE})
 
 # Пунктуація-термінатор: клавіші, що ЗАВЕРШУЮТЬ слово одним видимим символом
 # і мають запускати автокорекцію на щойно набраному слові (напр. «так?» —
@@ -213,6 +229,23 @@ class KBDLLHOOKSTRUCT(ctypes.Structure):
     _fields_ = [
         ("vkCode",      ctypes.wintypes.DWORD),
         ("scanCode",    ctypes.wintypes.DWORD),
+        ("flags",       ctypes.wintypes.DWORD),
+        ("time",        ctypes.wintypes.DWORD),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    ]
+
+
+class POINT(ctypes.Structure):
+    _fields_ = [
+        ("x", ctypes.c_long),
+        ("y", ctypes.c_long),
+    ]
+
+
+class MSLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("pt",          POINT),
+        ("mouseData",   ctypes.wintypes.DWORD),
         ("flags",       ctypes.wintypes.DWORD),
         ("time",        ctypes.wintypes.DWORD),
         ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
@@ -932,6 +965,47 @@ class DoubleTapDetector:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Детектор редагування: якщо курсор рухався, наступний фрагмент—вибір шматка
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class CaretGuard:
+    """
+    Запобігає автокорекції першого фрагмента після навігації клавішами.
+
+    Логіка: якщо користувач натиснув навігаційну клавішу (стрілка, Home, End,
+    PgUp, PgDn, Delete), то буфер очистили, але наступне введення—імовірно
+    редагування наявного слова, а не новий текст. На межі слова (пробіл/Enter)
+    чи пунктуації перевірка скидається.
+    """
+    __slots__ = ("_suppressed",)
+
+    def __init__(self):
+        self._suppressed = False
+
+    def on_nav(self):
+        """Навігаційна клавіша натиснута—наступний фрагмент може бути редагуванням."""
+        self._suppressed = True
+
+    def on_word_break(self) -> bool:
+        """
+        Межа слова. Повертає True, якщо була заборона на автокорекцію.
+        Скидає прапорець (межа = свіже слово).
+        """
+        result = self._suppressed
+        self._suppressed = False
+        return result
+
+    def on_focus_change(self):
+        """Зміна вікна—буфер видив інше середовище, свіжий контекст."""
+        self._suppressed = False
+
+    @property
+    def suppressed(self) -> bool:
+        """True, якщо наступна автокорекція мала б бути заблокована."""
+        return self._suppressed
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Глобальний стан
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -941,10 +1015,12 @@ auto_correct_enabled = True
 learning_enabled     = True        # запам'ятовувати ручні перемикання (пам'ять)
 tray_icon            = None
 ctrl_tap             = DoubleTapDetector()
+caret_guard          = CaretGuard()
 
 typed_scans       = []     # Буфер поточного слова — scan-коди клавіш (не символи)
 phrase_tokens     = []     # Буфер фрази для перемикання всього тексту (див. convert_phrase)
 hook_handle       = None
+mouse_hook_handle = None
 main_thread_id    = 0
 
 # Активне вікно на момент попереднього натискання. Якщо змінилося — курсор/контекст
@@ -1295,6 +1371,29 @@ def auto_correct_word(scans, layout: int, sep_vk: int, seq0: int, sep_shifted: b
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Mouse hook
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int,
+                    ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM)
+def mouse_hook(nCode, wParam, lParam):
+    """Миша: скидаємо буфер при кліку (користувач крутиться в тексту)."""
+    if nCode < 0 or wParam not in _MOUSE_DOWN_MSGS:
+        return user32.CallNextHookEx(mouse_hook_handle, nCode, wParam, lParam)
+
+    ms = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+    flags = ms.flags
+
+    if flags & LLMHF_INJECTED:
+        return user32.CallNextHookEx(mouse_hook_handle, nCode, wParam, lParam)
+
+    typed_scans.clear()
+    phrase_tokens.clear()
+    _pending_corrections.clear()
+
+    return user32.CallNextHookEx(mouse_hook_handle, nCode, wParam, lParam)
+
+
 # Keyboard hook
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1347,6 +1446,7 @@ def keyboard_hook(nCode, wParam, lParam):
         phrase_tokens.clear()
         _pending_corrections.clear()
         _clear_autocorrect_undo()
+        caret_guard.on_focus_change()
 
     # ── Ctrl — початок (потенційно чистого) тапу для подвійного натискання ───
     if vk in CTRL_VKS:
@@ -1387,11 +1487,12 @@ def keyboard_hook(nCode, wParam, lParam):
         typed_scans.clear()
         phrase_tokens.clear()
         _pending_corrections.clear()
+        caret_guard.on_nav()
         return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
     # ── Межа слова (пробіл / Enter / Tab) ───────────────────────────────────
     if vk in WORD_BREAK_VKS:
-        if auto_correct_enabled and typed_scans:
+        if auto_correct_enabled and typed_scans and not caret_guard.on_word_break():
             scans  = list(typed_scans)
             layout = current_layout()
             if DEBUG:
@@ -1401,6 +1502,8 @@ def keyboard_hook(nCode, wParam, lParam):
                 target=auto_correct_word,
                 args=(scans, layout, vk, _input_seq), daemon=True
             ).start()
+        else:
+            caret_guard.on_word_break()
         _phrase_add_sep(vk)            # роздільник лишається у фразі для ручного перемикання
         typed_scans.clear()
         return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
@@ -1422,7 +1525,7 @@ def keyboard_hook(nCode, wParam, lParam):
         # тож корекція відтворить його назад (з Shift), як роздільник.
         term_shifted = bool(user32.GetKeyState(VK_SHIFT) & 0x8000)
         if (enabled and auto_correct_enabled and typed_scans
-                and is_word_terminator(vk, term_shifted)):
+                and is_word_terminator(vk, term_shifted) and not caret_guard.on_word_break()):
             scans  = list(typed_scans)
             layout = current_layout()
             if DEBUG:
@@ -1432,6 +1535,8 @@ def keyboard_hook(nCode, wParam, lParam):
                 target=auto_correct_word,
                 args=(scans, layout, vk, _input_seq, term_shifted), daemon=True
             ).start()
+        else:
+            caret_guard.on_word_break()
         # Пунктуація — межа для ручної фрази (як просив користувач).
         typed_scans.clear()
         phrase_tokens.clear()
@@ -1606,7 +1711,7 @@ def _acquire_single_instance() -> bool:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    global running, hook_handle, main_thread_id
+    global running, hook_handle, mouse_hook_handle, main_thread_id
 
     if not _acquire_single_instance():
         user32.MessageBoxW(None, "Qwasda вже запущено.", "Qwasda", 0x40)
@@ -1622,7 +1727,7 @@ def main():
     # Словники — у фоні, щоб не блокувати старт трею
     threading.Thread(target=load_dicts, daemon=True).start()
 
-    hinst       = ctypes.pythonapi._handle
+    hinst = ctypes.pythonapi._handle
     hook_handle = user32.SetWindowsHookExW(WH_KEYBOARD_LL, keyboard_hook, hinst, 0)
     _dbg("hook installed: handle=%s" % hook_handle)
 
@@ -1631,16 +1736,29 @@ def main():
                            "Qwasda", 0x10)
         sys.exit(1)
 
+    mouse_hook_handle = user32.SetWindowsHookExW(WH_MOUSE_LL, mouse_hook, hinst, 0)
+    if mouse_hook_handle:
+        _dbg("mouse hook installed: handle=%s" % mouse_hook_handle)
+    else:
+        _dbg("WARNING: mouse hook failed (non-fatal)")
+
     threading.Thread(target=_run_tray, daemon=True).start()
 
-    atexit.register(lambda: user32.UnhookWindowsHookEx(hook_handle) if hook_handle else None)
-
-    def _sig(sig, frame):
-        global running, hook_handle
-        running = False
+    def _cleanup_hooks():
+        global hook_handle, mouse_hook_handle
         if hook_handle:
             user32.UnhookWindowsHookEx(hook_handle)
             hook_handle = None
+        if mouse_hook_handle:
+            user32.UnhookWindowsHookEx(mouse_hook_handle)
+            mouse_hook_handle = None
+
+    atexit.register(_cleanup_hooks)
+
+    def _sig(sig, frame):
+        global running
+        running = False
+        _cleanup_hooks()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, _sig)

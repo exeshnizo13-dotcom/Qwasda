@@ -17,6 +17,7 @@ import qwasda  # noqa: E402
 from qwasda import (  # noqa: E402
     SortedWordIndex,
     DoubleTapDetector,
+    CaretGuard,
     scans_to_ukr,
     scans_to_eng,
     manual_target,
@@ -513,4 +514,62 @@ def test_forget_learned_clears_all(learned, learned_path):
     qwasda.forget_learned()
     assert not qwasda.FORCE_EN
     assert not qwasda.BLOCK_UK
-    assert learned_path.exists()          # порожня пам'ять збережена на диск
+
+
+# ──────────────────────── Редагування: CaretGuard ─────────────────────────
+
+class TestCaretGuard:
+    """Детектор редагування — запобігає автокорекції на фрагментах слів."""
+
+    def test_init_not_suppressed(self):
+        guard = CaretGuard()
+        assert guard.suppressed is False
+
+    def test_on_nav_sets_suppressed(self):
+        guard = CaretGuard()
+        guard.on_nav()
+        assert guard.suppressed is True
+
+    def test_on_word_break_returns_suppressed_state(self):
+        guard = CaretGuard()
+        guard.on_nav()
+        result = guard.on_word_break()
+        assert result is True
+        assert guard.suppressed is False  # скинулася після повернення
+
+    def test_on_word_break_without_nav_returns_false(self):
+        guard = CaretGuard()
+        result = guard.on_word_break()
+        assert result is False
+        assert guard.suppressed is False
+
+    def test_multiple_on_nav_then_one_word_break(self):
+        """Кілька nav, потім одна межа слова — результат True один раз."""
+        guard = CaretGuard()
+        guard.on_nav()
+        guard.on_nav()
+        result = guard.on_word_break()
+        assert result is True
+
+    def test_after_word_break_next_nav_resets(self):
+        """Після межи слова, nav знову ставить прапорець."""
+        guard = CaretGuard()
+        guard.on_nav()
+        guard.on_word_break()
+        assert guard.suppressed is False
+        guard.on_nav()
+        assert guard.suppressed is True
+
+    def test_on_focus_change_clears_suppressed(self):
+        """Зміна вікна скидає прапорець."""
+        guard = CaretGuard()
+        guard.on_nav()
+        assert guard.suppressed is True
+        guard.on_focus_change()
+        assert guard.suppressed is False
+
+    def test_focus_change_clears_even_without_nav(self):
+        """Зміна вікна — це все одно нап, теоретично без попередньої."""
+        guard = CaretGuard()
+        guard.on_focus_change()
+        assert guard.suppressed is False
