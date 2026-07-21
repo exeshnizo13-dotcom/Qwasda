@@ -15,21 +15,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import qwasda  # noqa: E402
 from qwasda import (  # noqa: E402
-    SortedWordIndex,
-    DoubleTapDetector,
+    LANG_ENGLISH,
+    LANG_UKRAINIAN,
+    VK_RETURN,
+    VK_SPACE,
     CaretGuard,
-    scans_to_ukr,
-    scans_to_eng,
-    manual_target,
+    DoubleTapDetector,
+    SortedWordIndex,
     autocorrect_target,
     convert_phrase,
     is_word_terminator,
-    learn_valid_word,
     learn_block_word,
-    LANG_UKRAINIAN,
-    LANG_ENGLISH,
-    VK_SPACE,
-    VK_RETURN,
+    learn_valid_word,
+    manual_target,
+    scans_to_eng,
+    scans_to_ukr,
 )
 
 # Зворотна мапа «англ. літера → scan-код», щоб будувати буфери з рядків.
@@ -58,6 +58,7 @@ def stok(vk=VK_SPACE):
 
 # ───────────────────────── Конвертація розкладок ──────────────────────────
 
+
 def test_eng_reading_is_identity():
     assert scans_to_eng(scans("hello")) == "hello"
 
@@ -73,7 +74,7 @@ def test_ukr_reading_of_pryvit():
 
 
 def test_case_is_preserved():
-    caps = [True] + [False] * 4          # перша літера велика
+    caps = [True] + [False] * 4  # перша літера велика
     assert scans_to_eng(scans("hello", caps)) == "Hello"
     assert scans_to_ukr(scans("hello", caps)) == "Руддщ"
 
@@ -85,6 +86,7 @@ def test_punctuation_positions_map_to_ukr_letters():
 
 
 # ───────────────────────── Ручне перемикання ──────────────────────────────
+
 
 def test_manual_target_uk_to_en():
     conv, target = manual_target(scans("ghbdsn"), LANG_UKRAINIAN)
@@ -99,7 +101,7 @@ def test_manual_target_en_to_uk():
 
 
 def test_manual_target_ignores_other_layouts():
-    assert manual_target(scans("hello"), 0x0419) == (None, None)   # рос.
+    assert manual_target(scans("hello"), 0x0419) == (None, None)  # рос.
 
 
 def test_manual_target_empty_buffer():
@@ -107,6 +109,7 @@ def test_manual_target_empty_buffer():
 
 
 # ───────────────────────── SortedWordIndex ────────────────────────────────
+
 
 def _index(words):
     # рядки мають бути відсортовані в байтовому порядку UTF-8
@@ -138,7 +141,7 @@ def test_index_handles_crlf():
 
 
 def test_index_adds_trailing_newline():
-    idx = SortedWordIndex("привіт".encode("utf-8"))   # без \n у кінці
+    idx = SortedWordIndex("привіт".encode())  # без \n у кінці
     assert "привіт" in idx
 
 
@@ -151,19 +154,24 @@ def test_index_rejects_oversized(monkeypatch):
             return True
 
         def __len__(self):
-            return 2 ** 32
+            return 2**32
 
         def replace(self, *a):
             return self
+
     with pytest.raises(ValueError):
         SortedWordIndex(_Huge())
 
 
 # ───────────────────────── Автокорекція ───────────────────────────────────
 
+
 @pytest.fixture
-def dicts(monkeypatch):
+def dicts(tmp_path, monkeypatch):
     """Підставляє мінімальні словники й вмикає dicts_loaded."""
+    # Use temp directory for learned words to avoid loading real data
+    monkeypatch.setattr(qwasda, "APP_DIR", str(tmp_path))
+    monkeypatch.setattr(qwasda, "LEARNED_PATH", str(tmp_path / "learned.json"))
     monkeypatch.setattr(qwasda, "DICT_EN", frozenset({"hello", "the", "cat"}))
     monkeypatch.setattr(qwasda, "DICT_UK", _index(["привіт", "кіт", "так"]))
     monkeypatch.setattr(qwasda, "dicts_loaded", True)
@@ -171,97 +179,116 @@ def dicts(monkeypatch):
     monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 3)
 
 
+def _autocorrect_target(scans, layout):
+    """Helper to call autocorrect_target with test fixtures."""
+    from qwasda.dicts import DictionaryLoader
+    from qwasda.learning import LearningManager
+
+    dict_loader = DictionaryLoader(".")
+    dict_loader.dict_en = qwasda.DICT_EN
+    dict_loader.dict_uk = qwasda.DICT_UK
+    dict_loader.dicts_loaded = qwasda.dicts_loaded
+
+    config_manager = qwasda._get_config_manager()
+    learning = LearningManager(config_manager)
+
+    return autocorrect_target(
+        scans, layout, dict_loader, learning, qwasda.MIN_AUTOCORRECT_LEN, qwasda.MIN_EN_TO_UK
+    )
+
+
 def test_autocorrect_uk_to_en(dicts):
     # На екрані «руддщ» (UK), але це «hello» в англ. читанні.
-    conv, target = autocorrect_target(scans("hello"), LANG_UKRAINIAN)
+    conv, target = _autocorrect_target(scans("hello"), LANG_UKRAINIAN)
     assert conv == "hello"
     assert target == LANG_ENGLISH
 
 
 def test_autocorrect_en_to_uk(dicts):
     # На екрані «ghbdsn» (EN), але це «привіт» в укр. читанні.
-    conv, target = autocorrect_target(scans("ghbdsn"), LANG_ENGLISH)
+    conv, target = _autocorrect_target(scans("ghbdsn"), LANG_ENGLISH)
     assert conv == "привіт"
     assert target == LANG_UKRAINIAN
 
 
 def test_autocorrect_leaves_valid_en_word(dicts):
-    assert autocorrect_target(scans("hello"), LANG_ENGLISH) == (None, None)
+    assert _autocorrect_target(scans("hello"), LANG_ENGLISH) == (None, None)
 
 
 def test_autocorrect_leaves_valid_uk_word(dicts):
     # «привіт» валідне в UK — не чіпати.
-    assert autocorrect_target(scans("ghbdsn"), LANG_UKRAINIAN) == (None, None)
+    assert _autocorrect_target(scans("ghbdsn"), LANG_UKRAINIAN) == (None, None)
 
 
 def test_autocorrect_respects_min_len(dicts):
     # «the» → укр. читання коротке; нижче MIN_AUTOCORRECT_LEN взагалі ігнор.
-    assert autocorrect_target(scans("h"), LANG_ENGLISH) == (None, None)
+    assert _autocorrect_target(scans("h"), LANG_ENGLISH) == (None, None)
 
 
 def test_autocorrect_en_to_uk_threshold(dicts, monkeypatch):
     # «ghbdsn» (6 літер) дає валідне укр. «привіт», але поріг MIN_EN_TO_UK=7
     # вищий за довжину слова — корекції бути не повинно.
     monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 7)
-    assert autocorrect_target(scans("ghbdsn"), LANG_ENGLISH) == (None, None)
+    assert _autocorrect_target(scans("ghbdsn"), LANG_ENGLISH) == (None, None)
     # А зі стандартним порогом 3 — виправляється.
     monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 3)
-    assert autocorrect_target(scans("ghbdsn"), LANG_ENGLISH) == ("привіт", LANG_UKRAINIAN)
+    assert _autocorrect_target(scans("ghbdsn"), LANG_ENGLISH) == ("привіт", LANG_UKRAINIAN)
 
 
 def test_autocorrect_disabled_without_dicts(monkeypatch):
     monkeypatch.setattr(qwasda, "dicts_loaded", False)
-    assert autocorrect_target(scans("ghbdsn"), LANG_ENGLISH) == (None, None)
+    assert _autocorrect_target(scans("ghbdsn"), LANG_ENGLISH) == (None, None)
 
 
 def test_autocorrect_ignores_other_layouts(dicts):
-    assert autocorrect_target(scans("ghbdsn"), 0x0419) == (None, None)
+    assert _autocorrect_target(scans("ghbdsn"), 0x0419) == (None, None)
 
 
 # ── Однолітерні слова (я, і, з … / a, i) ──
 
+
 def test_autocorrect_single_uk_letter_en_to_uk(dicts):
     # «z» (EN) → «я» (валідне укр. однолітерне) → перемкнути в UK.
-    assert autocorrect_target(scans("z"), LANG_ENGLISH) == ("я", LANG_UKRAINIAN)
+    assert _autocorrect_target(scans("z"), LANG_ENGLISH) == ("я", LANG_UKRAINIAN)
     # «s» (EN) → «і».
-    assert autocorrect_target(scans("s"), LANG_ENGLISH) == ("і", LANG_UKRAINIAN)
+    assert _autocorrect_target(scans("s"), LANG_ENGLISH) == ("і", LANG_UKRAINIAN)
 
 
 def test_autocorrect_single_preserves_case(dicts):
-    conv, target = autocorrect_target(scans("z", caps=[True]), LANG_ENGLISH)
+    conv, target = _autocorrect_target(scans("z", caps=[True]), LANG_ENGLISH)
     assert conv == "Я"
     assert target == LANG_UKRAINIAN
 
 
 def test_autocorrect_single_valid_en_letter_untouched(dicts):
     # «a» та «i» — валідні англ. однолітерні, не чіпати.
-    assert autocorrect_target(scans("a"), LANG_ENGLISH) == (None, None)
-    assert autocorrect_target(scans("i"), LANG_ENGLISH) == (None, None)
+    assert _autocorrect_target(scans("a"), LANG_ENGLISH) == (None, None)
+    assert _autocorrect_target(scans("i"), LANG_ENGLISH) == (None, None)
 
 
 def test_autocorrect_single_random_letter_untouched(dicts):
     # «h» (EN) → укр. «р» не є однолітерним словом → не чіпати.
-    assert autocorrect_target(scans("h"), LANG_ENGLISH) == (None, None)
+    assert _autocorrect_target(scans("h"), LANG_ENGLISH) == (None, None)
 
 
 def test_autocorrect_single_valid_uk_letter_untouched(dicts):
     # «я» набране в UK (клавіша «z») — валідне укр. однолітерне, лишити.
-    assert autocorrect_target(scans("z"), LANG_UKRAINIAN) == (None, None)
+    assert _autocorrect_target(scans("z"), LANG_UKRAINIAN) == (None, None)
 
 
 # ───────────────────────── Подвійний Ctrl (DoubleTapDetector) ─────────────
 
-WIN = 0.4   # вікно подвійного тапу для тестів
+WIN = 0.4  # вікно подвійного тапу для тестів
 
 
 def test_double_tap_fires_on_second_release():
     d = DoubleTapDetector()
     # тап 1: down, up @ t=1.0
     d.on_trigger_down()
-    assert d.on_trigger_up(1.0, WIN) is False        # перший тап — ще не час
+    assert d.on_trigger_up(1.0, WIN) is False  # перший тап — ще не час
     # тап 2: down, up @ t=1.2 (у межах вікна)
     d.on_trigger_down()
-    assert d.on_trigger_up(1.2, WIN) is True          # другий чистий тап — спрацювати
+    assert d.on_trigger_up(1.2, WIN) is True  # другий чистий тап — спрацювати
 
 
 def test_double_tap_too_slow_does_not_fire():
@@ -269,14 +296,14 @@ def test_double_tap_too_slow_does_not_fire():
     d.on_trigger_down()
     d.on_trigger_up(1.0, WIN)
     d.on_trigger_down()
-    assert d.on_trigger_up(1.0 + WIN + 0.01, WIN) is False   # за межами вікна
+    assert d.on_trigger_up(1.0 + WIN + 0.01, WIN) is False  # за межами вікна
 
 
 def test_other_key_between_taps_breaks_chain():
     d = DoubleTapDetector()
     d.on_trigger_down()
     d.on_trigger_up(1.0, WIN)
-    d.on_other_key()                                  # натиснули літеру між тапами
+    d.on_other_key()  # натиснули літеру між тапами
     d.on_trigger_down()
     assert d.on_trigger_up(1.1, WIN) is False
 
@@ -285,7 +312,7 @@ def test_ctrl_plus_key_is_not_a_tap():
     # Ctrl+C: Ctrl down, потім C (інша клавіша), потім Ctrl up — не тап.
     d = DoubleTapDetector()
     d.on_trigger_down()
-    d.on_other_key()                                  # 'C' поки Ctrl утиснутий
+    d.on_other_key()  # 'C' поки Ctrl утиснутий
     assert d.on_trigger_up(1.0, WIN) is False
     # навіть наступний чистий тап одразу не має спрацювати (ланцюг порожній)
     d.on_trigger_down()
@@ -296,23 +323,25 @@ def test_autorepeat_down_is_ignored():
     # Утримання Ctrl шле багато down без up — не має псувати перший тап.
     d = DoubleTapDetector()
     d.on_trigger_down()
-    d.on_trigger_down()                               # auto-repeat
+    d.on_trigger_down()  # auto-repeat
     d.on_trigger_down()
-    assert d.on_trigger_up(1.0, WIN) is False         # завершився перший тап
+    assert d.on_trigger_up(1.0, WIN) is False  # завершився перший тап
     d.on_trigger_down()
     assert d.on_trigger_up(1.2, WIN) is True
 
 
 def test_triple_tap_fires_once_then_needs_new_pair():
     d = DoubleTapDetector()
-    d.on_trigger_down(); d.on_trigger_up(1.0, WIN)
     d.on_trigger_down()
-    assert d.on_trigger_up(1.1, WIN) is True           # 2-й тап спрацював
+    d.on_trigger_up(1.0, WIN)
     d.on_trigger_down()
-    assert d.on_trigger_up(1.2, WIN) is False          # 3-й — нова пара лише починається
+    assert d.on_trigger_up(1.1, WIN) is True  # 2-й тап спрацював
+    d.on_trigger_down()
+    assert d.on_trigger_up(1.2, WIN) is False  # 3-й — нова пара лише починається
 
 
 # ───────────────────────── Конфіг (персистентність) ───────────────────────
+
 
 @pytest.fixture
 def cfg_path(tmp_path, monkeypatch):
@@ -339,7 +368,7 @@ def test_config_round_trip(cfg_path, monkeypatch):
 
 def test_load_config_missing_file_is_noop(cfg_path, monkeypatch):
     monkeypatch.setattr(qwasda, "enabled", True)
-    qwasda.load_config()                  # файлу нема — нічого не падає
+    qwasda.load_config()  # файлу нема — нічого не падає
     assert qwasda.enabled is True
 
 
@@ -355,11 +384,12 @@ def test_load_config_rejects_bad_types(cfg_path, monkeypatch):
     monkeypatch.setattr(qwasda, "enabled", True)
     monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 3)
     qwasda.load_config()
-    assert qwasda.enabled is True         # рядок замість bool — проігноровано
-    assert qwasda.MIN_EN_TO_UK == 3       # від'ємне число — проігноровано
+    assert qwasda.enabled is True  # рядок замість bool — проігноровано
+    assert qwasda.MIN_EN_TO_UK == 3  # від'ємне число — проігноровано
 
 
 # ───────────────────────── Перемикання цілої фрази ────────────────────────
+
 
 def test_convert_phrase_en_to_uk_multiword():
     # «ghbdsn ghbdsn» (EN) → дві «привіт» через пробіл, перемикання в UK.
@@ -382,8 +412,8 @@ def test_convert_phrase_preserves_case_and_newline():
     caps = [True] + [False] * 4
     phrase = [wtok("hello", caps), stok(VK_RETURN), wtok("cat")]
     segments, strip_len, target = convert_phrase(phrase, LANG_ENGLISH)
-    assert segments[0] == ("text", "Руддщ")     # регістр збережено
-    assert segments[1] == ("sep", VK_RETURN)     # Enter лишається роздільником
+    assert segments[0] == ("text", "Руддщ")  # регістр збережено
+    assert segments[1] == ("sep", VK_RETURN)  # Enter лишається роздільником
     assert strip_len == 5 + 1 + 3
 
 
@@ -398,23 +428,25 @@ def test_convert_phrase_ignores_other_layouts():
 
 # ───────────────────── Пунктуація-термінатор автокорекції ──────────────────
 
+
 def test_word_terminator_oem_punct():
-    assert is_word_terminator(0xBF, False) is True    # «/»
-    assert is_word_terminator(0xBF, True) is True     # «?»
-    assert is_word_terminator(0xBE, False) is True    # «.»
+    assert is_word_terminator(0xBF, False) is True  # «/»
+    assert is_word_terminator(0xBF, True) is True  # «?»
+    assert is_word_terminator(0xBE, False) is True  # «.»
 
 
 def test_word_terminator_shifted_digit_only():
-    assert is_word_terminator(0x31, True) is True     # «!» (Shift+1)
-    assert is_word_terminator(0x31, False) is False   # звичайна «1» — частина слова
+    assert is_word_terminator(0x31, True) is True  # «!» (Shift+1)
+    assert is_word_terminator(0x31, False) is False  # звичайна «1» — частина слова
 
 
 def test_word_terminator_ignores_non_punct():
-    assert is_word_terminator(0x2E, False) is False   # VK_DELETE — не термінатор
-    assert is_word_terminator(0x41, False) is False   # «A»
+    assert is_word_terminator(0x2E, False) is False  # VK_DELETE — не термінатор
+    assert is_word_terminator(0x41, False) is False  # «A»
 
 
 # ───────────────────────── Пам'ять: FORCE / BLOCK ─────────────────────────
+
 
 @pytest.fixture
 def learned(monkeypatch):
@@ -429,38 +461,38 @@ def learned(monkeypatch):
 
 def test_force_en_enables_autocorrect(dicts, learned):
     # «qwert» (UK-набране) не в жодному словнику → без пам'яті не чіпається.
-    assert autocorrect_target(scans("qwert"), LANG_UKRAINIAN) == (None, None)
+    assert _autocorrect_target(scans("qwert"), LANG_UKRAINIAN) == (None, None)
     # Але вивчене як валідне EN → перемикається в англійську.
     qwasda.FORCE_EN.add("qwert")
-    assert autocorrect_target(scans("qwert"), LANG_UKRAINIAN) == ("qwert", LANG_ENGLISH)
+    assert _autocorrect_target(scans("qwert"), LANG_UKRAINIAN) == ("qwert", LANG_ENGLISH)
 
 
 def test_force_uk_bypasses_len_threshold(dicts, learned, monkeypatch):
-    monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 7)   # звичайні слова не пройшли б
-    qwasda.FORCE_UK.add("ко")                        # укр. читання «rj»
-    conv, target = autocorrect_target(scans("rj"), LANG_ENGLISH)
+    monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 7)  # звичайні слова не пройшли б
+    qwasda.FORCE_UK.add("ко")  # укр. читання «rj»
+    conv, target = _autocorrect_target(scans("rj"), LANG_ENGLISH)
     assert conv == "ко"
     assert target == LANG_UKRAINIAN
 
 
 def test_block_uk_prevents_autocorrect(dicts, learned):
     # «руддщ» (UK) звично перемкнулось би в «hello» (валідне EN).
-    assert autocorrect_target(scans("hello"), LANG_UKRAINIAN) == ("hello", LANG_ENGLISH)
+    assert _autocorrect_target(scans("hello"), LANG_UKRAINIAN) == ("hello", LANG_ENGLISH)
     qwasda.BLOCK_UK.add("руддщ")
-    assert autocorrect_target(scans("hello"), LANG_UKRAINIAN) == (None, None)
+    assert _autocorrect_target(scans("hello"), LANG_UKRAINIAN) == (None, None)
 
 
 def test_block_en_prevents_autocorrect(dicts, learned):
     # «ghbdsn» (EN) звично перемкнулось би в «привіт» (валідне UK).
-    assert autocorrect_target(scans("ghbdsn"), LANG_ENGLISH) == ("привіт", LANG_UKRAINIAN)
+    assert _autocorrect_target(scans("ghbdsn"), LANG_ENGLISH) == ("привіт", LANG_UKRAINIAN)
     qwasda.BLOCK_EN.add("ghbdsn")
-    assert autocorrect_target(scans("ghbdsn"), LANG_ENGLISH) == (None, None)
+    assert _autocorrect_target(scans("ghbdsn"), LANG_ENGLISH) == (None, None)
 
 
 def test_learn_valid_word_dedupes(learned):
     fe = qwasda.FORCE_EN
     assert learn_valid_word("qwert", LANG_ENGLISH) is True
-    assert learn_valid_word("qwert", LANG_ENGLISH) is False   # повтор — без змін
+    assert learn_valid_word("qwert", LANG_ENGLISH) is False  # повтор — без змін
     assert "qwert" in fe
     assert learn_valid_word("привіт", LANG_UKRAINIAN) is True
     assert "привіт" in qwasda.FORCE_UK
@@ -474,6 +506,7 @@ def test_learn_block_word_targets_right_set(learned):
 
 
 # ───────────────────────── Пам'ять: персистентність ───────────────────────
+
 
 @pytest.fixture
 def learned_path(tmp_path, monkeypatch):
@@ -491,13 +524,13 @@ def test_learned_round_trip(learned, learned_path):
     qwasda.FORCE_EN.clear()
     qwasda.BLOCK_EN.clear()
     qwasda.load_learned()
-    assert qwasda.FORCE_EN == {"qwert", "asdf"}
-    assert qwasda.BLOCK_EN == {"ghbdsn"}
+    assert {"qwert", "asdf"} == qwasda.FORCE_EN
+    assert {"ghbdsn"} == qwasda.BLOCK_EN
 
 
 def test_load_learned_missing_file_is_noop(learned, learned_path):
     qwasda.FORCE_EN.add("keep")
-    qwasda.load_learned()                 # файлу нема — нічого не падає
+    qwasda.load_learned()  # файлу нема — нічого не падає
     assert "keep" in qwasda.FORCE_EN
 
 
@@ -517,6 +550,7 @@ def test_forget_learned_clears_all(learned, learned_path):
 
 
 # ──────────────────────── Редагування: CaretGuard ─────────────────────────
+
 
 class TestCaretGuard:
     """Детектор редагування — запобігає автокорекції на фрагментах слів."""

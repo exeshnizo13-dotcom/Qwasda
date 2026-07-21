@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['qwasda.py'],
+    ['qwasda/__main__.py'],
     pathex=[],
     binaries=[],
     datas=[

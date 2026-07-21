@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Build EXE with PyInstaller
+        run: |
+          pyinstaller Qwasda.spec --clean --noconfirm
+
+      - name: Verify EXE
+        run: |
+          ./dist/Qwasda.exe --version || true
+
+      - name: Create checksums
+        run: |
+          cd dist
+          certutil -hashfile Qwasda.exe SHA256 > Qwasda.exe.sha256
+          certutil -hashfile Qwasda.exe MD5 > Qwasda.exe.md5
+          type Qwasda.exe.sha256
+          type Qwasda.exe.md5
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref }}
+          name: Qwasda v${{ steps.version.outputs.VERSION }}
+          body: |
+            ## Qwasda v${{ steps.version.outputs.VERSION }}
+
+            Автоматичне визначення та перемикання розкладки клавіатури між українською та англійською.
+
+            ### Завантаження
+            - `Qwasda.exe` — портативний виконавчий файл (Windows 10/11)
+            - Контрольні суми: `Qwasda.exe.sha256`, `Qwasda.exe.md5`
+
+            ### Встановлення
+            1. Завантажте `Qwasda.exe`
+            2. Запустіть — програма з'явиться в системному треї
+            3. (Опціонально) Клацніть правою кнопкою → "Автозапуск увімкнено"
+
+            ### Перевірка цілісності
+            ```powershell
+            certutil -hashfile Qwasda.exe SHA256
+            ```
+            Порівняйте з вмістом `Qwasda.exe.sha256`.
+
+          draft: false
+          prerelease: false
+          files: |
+            dist/Qwasda.exe
+            dist/Qwasda.exe.sha256
+            dist/Qwasda.exe.md5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

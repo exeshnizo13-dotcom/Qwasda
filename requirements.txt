@@ -2,3 +2,4 @@
 # (синхронізовано з pyproject.toml [project.dependencies])
 pystray>=0.19
 pillow>=10.0
+psutil>=5.9
