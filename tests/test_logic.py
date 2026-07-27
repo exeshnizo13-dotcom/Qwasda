@@ -52,9 +52,9 @@ def wtok(eng_word: str, caps=None):
     return ["w", scans(eng_word, caps)]
 
 
-def stok(vk=VK_SPACE):
+def stok(vk=VK_SPACE, shifted=False):
     """Токен-роздільник для phrase_tokens."""
-    return ["s", vk]
+    return ["s", (vk, shifted) if shifted else vk]
 
 
 # ───────────────────────── Конвертація розкладок ──────────────────────────

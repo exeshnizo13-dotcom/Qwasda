@@ -148,7 +148,7 @@ class CaretGuard:
 class PhraseBuffer:
     """
     Accumulates words and separators for full-phrase manual conversion.
-    Survives word boundaries; cleared on auto-correct, navigation, punctuation, hotkeys.
+    Survives word boundaries; cleared on auto-correct, navigation, hotkeys.
     """
 
     def __init__(self, max_tokens: int = 400):
@@ -162,9 +162,9 @@ class PhraseBuffer:
             self.tokens.append(("w", [(scan, shifted)]))
         self._trim()
 
-    def add_sep(self, vk: int) -> None:
+    def add_sep(self, vk: int, shifted: bool = False) -> None:
         if self.tokens:
-            self.tokens.append(("s", vk))
+            self.tokens.append(("s", (vk, shifted)))
 
     def backspace(self) -> None:
         if not self.tokens:
@@ -459,8 +459,10 @@ class CorrectionWorker:
                 assert isinstance(val, str)
                 send_unicode_string(val)
             else:
-                assert isinstance(val, int)
-                self._send_sep(val, False)
+                if isinstance(val, tuple):
+                    self._send_sep(*val)
+                else:
+                    self._send_sep(val, False)
         time.sleep(0.02)
         set_foreground_layout(target)
 
@@ -548,6 +550,7 @@ class KeyboardHook:
 
         self._hook: ctypes.c_void_p | None = None
         self._callback = None
+        self._typed_scans: list[Scan] = []
         self._last_hwnd: int | None = None
         self._cached_layout = LANG_ENGLISH
         self._cached_layout_time = 0.0
@@ -602,6 +605,7 @@ class KeyboardHook:
                     sep_shifted=False,
                     seq=0,
                     is_manual=True,
+                    phrase=self.phrase_buffer.copy(),
                 )
             )
             return _call_next_hook(self._hook, nCode, wParam, lParam)
@@ -619,6 +623,7 @@ class KeyboardHook:
 
         # Window change detection
         if self._foreground_changed():
+            self._typed_scans.clear()
             self.worker._pending_corrections.clear()
             self.worker.clear_autocorrect_undo()
             self.phrase_buffer.clear()
@@ -641,6 +646,7 @@ class KeyboardHook:
 
         # Other modifiers down (Ctrl/Alt/Win) - hotkey, don't process
         if any_modifier_down():
+            self._typed_scans.clear()
             self.phrase_buffer.clear()
             self.worker._pending_corrections.clear()
             return _call_next_hook(self._hook, nCode, wParam, lParam)
@@ -650,14 +656,15 @@ class KeyboardHook:
 
         # Backspace
         if vk == VK_BACK:
-            if self.worker._input_seq > 0:  # Only if we have typed something
-                # Note: we can't easily pop from worker's view, but phrase buffer tracks
+            if self._typed_scans:
+                self._typed_scans.pop()
                 self.phrase_buffer.backspace()
                 self.worker._pending_corrections.clear()
             return _call_next_hook(self._hook, nCode, wParam, lParam)
 
         # Navigation keys - clear buffers, set caret guard
         if vk in NAV_CLEAR_VKS:
+            self._typed_scans.clear()
             self.phrase_buffer.clear()
             self.worker._pending_corrections.clear()
             self.caret_guard.on_nav()
@@ -667,25 +674,25 @@ class KeyboardHook:
         if vk in WORD_BREAK_VKS:
             if (
                 self.config.auto_correct_enabled
-                and self.worker._input_seq > 0
+                and self._typed_scans
                 and not self.caret_guard.on_word_break()
             ):
-                scans = self.phrase_buffer.get_last_word_scans()
-                if scans:
-                    layout = self.get_layout(True)
-                    self.worker.enqueue(
-                        CorrectionTask(
-                            scans=scans,
-                            layout=layout,
-                            sep_vk=vk,
-                            sep_shifted=False,
-                            seq=self.worker._input_seq,
-                            is_manual=False,
-                        )
+                scans = list(self._typed_scans)
+                layout = self.get_layout(True)
+                self.worker.enqueue(
+                    CorrectionTask(
+                        scans=scans,
+                        layout=layout,
+                        sep_vk=vk,
+                        sep_shifted=False,
+                        seq=self.worker._input_seq,
+                        is_manual=False,
                     )
+                )
             else:
                 self.caret_guard.on_word_break()
             self.phrase_buffer.add_sep(vk)
+            self._typed_scans.clear()
             return _call_next_hook(self._hook, nCode, wParam, lParam)
 
         # Letter keys (by scan code)
@@ -693,6 +700,9 @@ class KeyboardHook:
             shifted = bool(user32.GetKeyState(VK_SHIFT) & 0x8000) ^ bool(
                 user32.GetKeyState(VK_CAPITAL) & 0x0001
             )
+            self._typed_scans.append((sc, shifted))
+            if len(self._typed_scans) > 100:
+                del self._typed_scans[:-50]
             self.phrase_buffer.add_letter(sc, shifted)
             return _call_next_hook(self._hook, nCode, wParam, lParam)
 
@@ -702,27 +712,30 @@ class KeyboardHook:
 
         if (
             self.config.auto_correct_enabled
-            and self.worker._input_seq > 0
+            and self._typed_scans
             and is_word_terminator(vk, term_shifted)
             and not self.caret_guard.on_word_break()
         ):
-            scans = self.phrase_buffer.get_last_word_scans()
-            if scans:
-                layout = self.get_layout(True)
-                self.worker.enqueue(
-                    CorrectionTask(
-                        scans=scans,
-                        layout=layout,
-                        sep_vk=vk,
-                        sep_shifted=term_shifted,
-                        seq=self.worker._input_seq,
-                        is_manual=False,
-                    )
+            scans = list(self._typed_scans)
+            layout = self.get_layout(True)
+            self.worker.enqueue(
+                CorrectionTask(
+                    scans=scans,
+                    layout=layout,
+                    sep_vk=vk,
+                    sep_shifted=term_shifted,
+                    seq=self.worker._input_seq,
+                    is_manual=False,
                 )
+            )
         else:
             self.caret_guard.on_word_break()
 
-        self.phrase_buffer.clear()
+        self._typed_scans.clear()
+        if is_word_terminator(vk, term_shifted):
+            self.phrase_buffer.add_sep(vk, term_shifted)
+        else:
+            self.phrase_buffer.clear()
         return _call_next_hook(self._hook, nCode, wParam, lParam)
 
     def _foreground_changed(self) -> bool:

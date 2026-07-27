@@ -125,10 +125,11 @@ MIN_EN_TO_UK = 3
 
 Scan = tuple[int, bool]
 WordToken: TypeAlias = tuple[Literal["w"], list[Scan]]
-SeparatorToken: TypeAlias = tuple[Literal["s"], int]
+SeparatorValue: TypeAlias = int | tuple[int, bool]
+SeparatorToken: TypeAlias = tuple[Literal["s"], SeparatorValue]
 PhraseToken: TypeAlias = WordToken | SeparatorToken
 TextSegment: TypeAlias = tuple[Literal["text"], str]
-SeparatorSegment: TypeAlias = tuple[Literal["sep"], int]
+SeparatorSegment: TypeAlias = tuple[Literal["sep"], SeparatorValue]
 PhraseSegment: TypeAlias = TextSegment | SeparatorSegment
 
 WORD_JOINERS = frozenset({"'", "’"})
@@ -291,7 +292,7 @@ def convert_phrase(
     """
     Convert entire phrase for manual switch.
     Returns (segments, strip_len, target_layout) or (None, 0, None).
-    segments: list of ("text", str) or ("sep", vk)
+    segments: list of ("text", str) or ("sep", (vk, shifted))
     """
     from .win32 import LANG_ENGLISH, LANG_UKRAINIAN
 
