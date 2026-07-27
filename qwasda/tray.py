@@ -6,7 +6,9 @@ Uses pystray for cross-platform tray support (Windows only in practice).
 
 from __future__ import annotations
 
+import logging
 import threading
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -37,7 +39,7 @@ else:
 class TrayIcon:
     """
     System tray icon with dynamic menu.
-    Runs on dedicated thread; all UI callbacks marshal to main thread via queue.
+    Integrated with the main Windows message loop via pystray.run_detached().
     """
 
     def __init__(
@@ -58,7 +60,6 @@ class TrayIcon:
         self.dict_loader = dict_loader
         self.version = version
 
-        # Callbacks (must be thread-safe)
         self._toggle_enabled_callback = on_toggle_enabled
         self._toggle_auto_callback = on_toggle_auto
         self._toggle_learning_callback = on_toggle_learning
@@ -67,19 +68,15 @@ class TrayIcon:
         self._exit_callback = on_exit
 
         self._icon: Any = None
-        self._thread: threading.Thread | None = None
         self._running = False
+        self._notify_thread: threading.Thread | None = None
 
     def run(self) -> None:
-        """Start tray icon in background thread."""
+        """Start tray icon attached to the app's existing message loop."""
         if self._running:
             return
-        self._running = True
-        self._thread = threading.Thread(target=self._run_loop, daemon=True)
-        self._thread.start()
-
-    def _run_loop(self) -> None:
         if pystray is None:
+            logging.getLogger("qwasda.tray").error("pystray import unavailable")
             return
 
         self._icon = pystray.Icon(
@@ -88,23 +85,43 @@ class TrayIcon:
             f"Qwasda v{self.version} — перемикач розкладки",
             self._make_menu(),
         )
-        self._icon.notify(
-            f"Qwasda v{self.version} запущено! Подвійний Ctrl — перемкнути слово.",
-            "Qwasda",
-        )
-        self._icon.run()
+        self._icon.run_detached()
+        self._running = True
+        logging.getLogger("qwasda.tray").info("Tray icon detached event loop started")
+
+        self._notify_thread = threading.Thread(target=self._notify_after_start, daemon=True)
+        self._notify_thread.start()
+
+    def _notify_after_start(self) -> None:
+        for _ in range(20):
+            if self.is_visible():
+                break
+            time.sleep(0.25)
+        if self._icon:
+            try:
+                self._icon.notify(
+                    f"Qwasda v{self.version} запущено! Подвійний Ctrl — перемкнути слово.",
+                    "Qwasda",
+                )
+            except Exception:
+                logging.getLogger("qwasda.tray").exception("Tray notification failed")
 
     def stop(self) -> None:
         """Stop tray icon."""
         self._running = False
         if self._icon:
             self._icon.stop()
-        if self._thread:
-            self._thread.join(timeout=1.0)
 
     def is_running(self) -> bool:
         """Check if tray is running."""
-        return self._running and self._thread is not None and self._thread.is_alive()
+        return self._running and self._icon is not None
+
+    def is_visible(self) -> bool:
+        """Check whether pystray reports the icon visible."""
+        try:
+            return bool(self._icon is not None and self._icon.visible)
+        except Exception:
+            return False
 
     def update_menu(self) -> None:
         """Refresh menu (call after config/learning changes)."""
@@ -138,7 +155,7 @@ class TrayIcon:
         if pystray is None:
             return None
 
-        cfg = self.config  # Config object directly
+        cfg = self.config
         stats = self.learning.stats()
 
         return pystray.Menu(
@@ -182,7 +199,6 @@ class TrayIcon:
         )
         return os.path.exists(os.path.join(startup_dir, "Qwasda.bat"))
 
-    # Callback wrappers
     def _on_toggle_enabled(self, icon: Any, item: Any) -> None:
         self._toggle_enabled_callback()
 

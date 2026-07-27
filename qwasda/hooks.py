@@ -484,7 +484,9 @@ class CorrectionWorker:
                 tgt = scans_to_ukr(scans).lower()
                 if self.dict_loader.dicts_loaded and src in self.dict_loader.dict_en:
                     continue
-            if not tgt.isalpha():
+            from .conversion import is_word_text
+
+            if not is_word_text(tgt):
                 continue
             if self.learning.learn_valid_word(tgt, to_layout):
                 changed = True
@@ -545,21 +547,23 @@ class KeyboardHook:
         self.get_layout = get_layout_func
 
         self._hook: ctypes.c_void_p | None = None
+        self._callback = None
         self._last_hwnd: int | None = None
         self._cached_layout = LANG_ENGLISH
         self._cached_layout_time = 0.0
 
     def install(self, hinst: int) -> bool:
-        callback = ctypes.WINFUNCTYPE(
+        self._callback = ctypes.WINFUNCTYPE(
             ctypes.c_long, ctypes.c_int, ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM
         )(self._hook_proc)
-        self._hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, callback, hinst, 0)
+        self._hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._callback, hinst, 0)
         return self._hook is not None
 
     def uninstall(self) -> None:
         if self._hook:
             user32.UnhookWindowsHookEx(self._hook)
             self._hook = None
+        self._callback = None
 
     def is_installed(self) -> bool:
         """Check if hook is installed."""
@@ -600,6 +604,9 @@ class KeyboardHook:
                     is_manual=True,
                 )
             )
+            return _call_next_hook(self._hook, nCode, wParam, lParam)
+
+        if is_up:
             return _call_next_hook(self._hook, nCode, wParam, lParam)
 
         # Key DOWN - real input
@@ -738,18 +745,20 @@ class MouseHook:
         self.phrase_buffer = phrase_buffer
         self.worker = worker
         self._hook: ctypes.c_void_p | None = None
+        self._callback = None
 
     def install(self, hinst: int) -> bool:
-        callback = ctypes.WINFUNCTYPE(
+        self._callback = ctypes.WINFUNCTYPE(
             ctypes.c_long, ctypes.c_int, ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM
         )(self._hook_proc)
-        self._hook = user32.SetWindowsHookExW(WH_MOUSE_LL, callback, hinst, 0)
+        self._hook = user32.SetWindowsHookExW(WH_MOUSE_LL, self._callback, hinst, 0)
         return self._hook is not None
 
     def uninstall(self) -> None:
         if self._hook:
             user32.UnhookWindowsHookEx(self._hook)
             self._hook = None
+        self._callback = None
 
     def is_installed(self) -> bool:
         """Check if hook is installed."""

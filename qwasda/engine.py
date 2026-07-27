@@ -21,6 +21,7 @@ import signal
 import sys
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -41,7 +42,7 @@ if TYPE_CHECKING:
     from .tray import TrayIcon
     from .win32 import get_foreground_layout
 
-from .admin import ELEVATED_ARG, get_integrity_level, is_admin, request_elevation
+from .admin import get_integrity_level, is_admin
 from .config import Config, ConfigManager
 from .conversion import (
     is_word_terminator,
@@ -135,6 +136,7 @@ class QwasdaEngine:
             "toggle_startup": self._toggle_startup,
             "exit": self._request_exit,
         }
+        self.dict_loader.on_loaded = self._on_dictionaries_loaded
 
     def _get_version(self) -> str:
         try:
@@ -153,10 +155,23 @@ class QwasdaEngine:
         try:
             return self._run()
         except Exception:
+            self._write_startup_failure(traceback.format_exc())
             logging.getLogger("qwasda.engine").exception("Qwasda startup or runtime failure")
             return 1
         finally:
             self._cleanup()
+
+    def _write_startup_failure(self, details: str) -> None:
+        """Best-effort fallback log when structured logging is not available yet."""
+        try:
+            log_dir = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Qwasda" / "Logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            with (log_dir / "startup.log").open("a", encoding="utf-8") as fh:
+                fh.write(details)
+                if not details.endswith("\n"):
+                    fh.write("\n")
+        except OSError:
+            pass
 
     def _run(self) -> int:
         """Initialize the application and run its message loop."""
@@ -182,13 +197,13 @@ class QwasdaEngine:
             },
         )
 
-        # A frozen build may already request elevation through its manifest.
-        # Source/script launches use an explicit marker to avoid an elevation loop.
-        if not admin_status and ELEVATED_ARG not in sys.argv:
-            elevated, error = request_elevation()
-            if elevated:
-                return 0
-            logger.warning("Could not obtain administrator privileges", extra={"error": error})
+        # Do not hard-require elevation on startup: keyboard hooks work for
+        # normal apps without admin, and forcing UAC here can make the app
+        # appear to "not start" if the prompt is declined or blocked.
+        if not admin_status:
+            logger.warning(
+                "Running without administrator privileges; elevated windows may be unavailable"
+            )
 
         # Single instance check
         if not self.single_instance.acquire():
@@ -205,9 +220,19 @@ class QwasdaEngine:
         # Apply config to engine state
         self._enabled.set() if self.config.enabled else self._enabled.clear()
 
-        # Start dictionary loading in background
-        dict_thread = threading.Thread(target=self.dict_loader.load, daemon=True)
-        dict_thread.start()
+        # Load dictionaries before installing hooks so the app never sits in a
+        # half-initialized state where auto-correct is disabled indefinitely.
+        dict_start = time.perf_counter()
+        self.dict_loader.load()
+        logger.info(
+            "Dictionaries loaded during startup",
+            extra={
+                "loaded": self.dict_loader.dicts_loaded,
+                "en_words": len(self.dict_loader.dict_en),
+                "uk_words": len(self.dict_loader.dict_uk),
+                "seconds": round(time.perf_counter() - dict_start, 3),
+            },
+        )
 
         # Initialize worker
         self.worker = CorrectionWorker(
@@ -310,6 +335,23 @@ class QwasdaEngine:
         import faulthandler
 
         faulthandler.dump_traceback()
+
+    def _on_dictionaries_loaded(self, loaded: bool) -> None:
+        """React to dictionary loading finishing in the background."""
+        logger = logging.getLogger("qwasda.engine")
+        logger.info(
+            "Dictionary loading finished",
+            extra={
+                "loaded": loaded,
+                "en_words": len(self.dict_loader.dict_en),
+                "uk_words": len(self.dict_loader.dict_uk),
+            },
+        )
+        if self.tray:
+            try:
+                self.tray.update_menu()
+            except Exception:
+                logger.exception("Failed to refresh tray after dictionary load")
 
     def _cleanup(self) -> None:
         """Clean up all resources; safe to call repeatedly and partially."""

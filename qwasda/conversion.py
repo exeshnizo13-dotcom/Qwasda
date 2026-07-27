@@ -131,6 +131,8 @@ TextSegment: TypeAlias = tuple[Literal["text"], str]
 SeparatorSegment: TypeAlias = tuple[Literal["sep"], int]
 PhraseSegment: TypeAlias = TextSegment | SeparatorSegment
 
+WORD_JOINERS = frozenset({"'", "’"})
+
 
 @dataclass
 class ScanBuffer:
@@ -176,6 +178,35 @@ def scans_to_ukr(scans: list[Scan]) -> str:
 
 def scans_to_eng(scans: list[Scan]) -> str:
     return _read_scans(scans, ENG_AT_POS)
+
+
+def is_word_text(text: str) -> bool:
+    """
+    Return True for lexical words, including forms with internal apostrophes.
+
+    Apostrophes are allowed only between alphabetic characters, so words like
+    "п'ять" and "l'heure" stay whole, while leading/trailing punctuation does not.
+    """
+    if not text:
+        return False
+
+    prev_is_alpha = False
+    saw_alpha = False
+    pending_joiner = False
+
+    for ch in text:
+        if ch.isalpha():
+            saw_alpha = True
+            prev_is_alpha = True
+            pending_joiner = False
+            continue
+        if ch in WORD_JOINERS and prev_is_alpha:
+            prev_is_alpha = False
+            pending_joiner = True
+            continue
+        return False
+
+    return saw_alpha and not pending_joiner
 
 
 def manual_target(scans: list[Scan], layout: int) -> tuple[str | None, int | None]:

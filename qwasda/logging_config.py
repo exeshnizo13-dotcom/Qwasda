@@ -109,7 +109,10 @@ class ColoredConsoleFormatter(logging.Formatter):
         super().__init__(
             fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s", datefmt="%H:%M:%S"
         )
-        self.use_colors = use_colors and sys.stdout.isatty()
+        stdout = sys.stdout
+        self.use_colors = bool(
+            use_colors and stdout is not None and hasattr(stdout, "isatty") and stdout.isatty()
+        )
 
     def format(self, record: logging.LogRecord) -> str:
         if self.use_colors:

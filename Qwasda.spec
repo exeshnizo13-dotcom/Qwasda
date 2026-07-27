@@ -2,14 +2,14 @@
 
 
 a = Analysis(
-    ['qwasda/__main__.py'],
+    ['launcher.py'],
     pathex=[],
     binaries=[],
     datas=[
         ('data/words_en.txt.gz', 'data'),
         ('data/words_uk.txt.gz', 'data'),
     ],
-    hiddenimports=[],
+    hiddenimports=['six', 'six.moves'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

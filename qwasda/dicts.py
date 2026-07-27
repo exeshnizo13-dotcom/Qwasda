@@ -6,6 +6,7 @@ from gzipped text files in background thread.
 """
 
 import gzip
+import logging
 import os
 import sys
 import threading
@@ -86,24 +87,83 @@ class DictionaryLoader:
         self.dict_uk: SortedWordIndex = SortedWordIndex(b"")
         self.dicts_loaded = False
         self._thread: threading.Thread | None = None
+        self._logger = logging.getLogger("qwasda.dicts")
+
+    def _resource_candidates(self, name: str) -> list[str]:
+        """Return plausible dictionary file locations for source and frozen runs."""
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates = []
+
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(os.path.join(meipass, "data", name))
+
+        if self.data_dir:
+            candidates.append(os.path.join(self.data_dir, name))
+            candidates.append(os.path.join(self.data_dir, "data", name))
+
+        candidates.append(os.path.join(module_dir, "data", name))
+        candidates.append(os.path.join(os.path.dirname(module_dir), "data", name))
+
+        seen: set[str] = set()
+        unique_candidates: list[str] = []
+        for path in candidates:
+            normalized = os.path.normpath(path)
+            if normalized not in seen:
+                seen.add(normalized)
+                unique_candidates.append(normalized)
+        return unique_candidates
 
     def _resource_path(self, name: str) -> str:
-        """Resolve path for both script and PyInstaller frozen exe."""
-        base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-        return os.path.join(base, "data", name)
+        """Resolve a dictionary path, preferring existing files."""
+        candidates = self._resource_candidates(name)
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        return candidates[0]
 
     def _load_frozenset(self, name: str) -> frozenset[str]:
+        path = self._resource_path(name)
         try:
-            with gzip.open(self._resource_path(name), "rt", encoding="utf-8") as f:
-                return frozenset(line.strip() for line in f if line.strip())
-        except OSError:
+            self._logger.info("Loading dictionary", extra={"dict_name": name, "path": path})
+            with gzip.open(path, "rt", encoding="utf-8") as f:
+                words = frozenset(line.strip() for line in f if line.strip())
+            self._logger.info(
+                "Dictionary loaded",
+                extra={"dict_name": name, "path": path, "words": len(words)},
+            )
+            return words
+        except Exception:
+            self._logger.exception(
+                "Failed to load dictionary",
+                extra={
+                    "dict_name": name,
+                    "path": path,
+                    "candidates": self._resource_candidates(name),
+                },
+            )
             return frozenset()
 
     def _load_index(self, name: str) -> SortedWordIndex:
+        path = self._resource_path(name)
         try:
-            with gzip.open(self._resource_path(name), "rb") as f:
-                return SortedWordIndex(f.read())
-        except OSError:
+            self._logger.info("Loading dictionary", extra={"dict_name": name, "path": path})
+            with gzip.open(path, "rb") as f:
+                index = SortedWordIndex(f.read())
+            self._logger.info(
+                "Dictionary loaded",
+                extra={"dict_name": name, "path": path, "words": len(index)},
+            )
+            return index
+        except Exception:
+            self._logger.exception(
+                "Failed to load dictionary",
+                extra={
+                    "dict_name": name,
+                    "path": path,
+                    "candidates": self._resource_candidates(name),
+                },
+            )
             return SortedWordIndex(b"")
 
     def load(self) -> None:

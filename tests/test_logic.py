@@ -24,6 +24,7 @@ from qwasda import (  # noqa: E402
     SortedWordIndex,
     autocorrect_target,
     convert_phrase,
+    is_word_text,
     is_word_terminator,
     learn_block_word,
     learn_valid_word,
@@ -83,6 +84,16 @@ def test_punctuation_positions_map_to_ukr_letters():
     # клавіша ';' (scan 0x27) в укр. розкладці — це 'ж'
     assert scans_to_ukr([(0x27, False)]) == "ж"
     assert scans_to_eng([(0x27, False)]) == ";"
+
+
+def test_is_word_text_accepts_internal_apostrophe():
+    assert is_word_text("п'ять") is True
+    assert is_word_text("l’heure") is True
+
+
+def test_is_word_text_rejects_edge_apostrophes():
+    assert is_word_text("'слово") is False
+    assert is_word_text("слово'") is False
 
 
 # ───────────────────────── Ручне перемикання ──────────────────────────────
