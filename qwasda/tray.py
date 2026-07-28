@@ -199,12 +199,9 @@ class TrayIcon:
         )
 
     def _is_in_startup(self) -> bool:
-        import os
+        from .startup import is_enabled
 
-        startup_dir = os.path.join(
-            os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup"
-        )
-        return os.path.exists(os.path.join(startup_dir, "Qwasda.bat"))
+        return is_enabled()
 
     def _on_toggle_enabled(self, icon: Any, item: Any) -> None:
         self._toggle_enabled_callback()

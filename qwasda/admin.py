@@ -239,10 +239,13 @@ def get_uac_manifest() -> str:
     which will prompt for elevation if the user is an admin,
     or run as standard user if not.
     """
-    return """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    from .version import __version__
+
+    version = __version__.replace(".", ".") + ".0"
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity
-    version="1.3.4.0"
+    version="{version}"
     processorArchitecture="*"
     name="Qwasda"
     type="win32"
@@ -261,9 +264,9 @@ def get_uac_manifest() -> str:
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
       <!-- Windows 10 -->
-      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+      <supportedOS Id="{{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}}" />
       <!-- Windows 11 -->
-      <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}" />
+      <supportedOS Id="{{1f676c76-80e1-4239-95bb-83d0f6d0da78}}" />
     </application>
   </compatibility>
   <application xmlns="urn:schemas-microsoft-com:asm.v3">

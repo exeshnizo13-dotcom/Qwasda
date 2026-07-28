@@ -11,6 +11,9 @@ permissions:
 jobs:
   build-and-release:
     runs-on: windows-latest
+    env:
+      QWASDA_SIGNTOOL_CERT: ${{ secrets.QWASDA_SIGNTOOL_CERT }}
+      QWASDA_SIGNTOOL_PASSWORD: ${{ secrets.QWASDA_SIGNTOOL_PASSWORD }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -26,59 +29,56 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+          pip install -r requirements.txt -r requirements-release.txt
+          choco install nsis --version=3.12 --no-progress -y
 
-      - name: Extract version from tag
-        id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-
-      - name: Build EXE with PyInstaller
+      - name: Verify tag version
+        shell: pwsh
         run: |
-          pyinstaller Qwasda.spec --clean --noconfirm
+          $tagVersion = "${{ github.ref_name }}".Substring(1)
+          $projectVersion = (Get-Content qwasda/version.py | Select-String '__version__').ToString() -replace '.*"([0-9.]+)".*', '$1'
+          if ($tagVersion -ne $projectVersion) { throw "Tag $tagVersion does not match project version $projectVersion" }
 
-      - name: Verify EXE
+      - name: Build portable EXE and NSIS installer
         run: |
-          ./dist/Qwasda.exe --version || true
+          python release.py
 
-      - name: Create checksums
+      - name: Verify packaged CLI
         run: |
-          cd dist
-          certutil -hashfile Qwasda.exe SHA256 > Qwasda.exe.sha256
-          certutil -hashfile Qwasda.exe MD5 > Qwasda.exe.md5
-          type Qwasda.exe.sha256
-          type Qwasda.exe.md5
+          ./artifacts/Qwasda-1.4.0-x64.exe --version
+          ./artifacts/Qwasda-1.4.0-x64.exe --smoke-test
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref }}
-          name: Qwasda v${{ steps.version.outputs.VERSION }}
+          name: Qwasda v${{ github.ref_name }}
           body: |
-            ## Qwasda v${{ steps.version.outputs.VERSION }}
+            ## Qwasda v${{ github.ref_name }}
 
             Автоматичне визначення та перемикання розкладки клавіатури між українською та англійською.
 
             ### Завантаження
-            - `Qwasda.exe` — портативний виконавчий файл (Windows 10/11)
-            - Контрольні суми: `Qwasda.exe.sha256`, `Qwasda.exe.md5`
+            - `Qwasda-1.4.0-x64.exe` — portable-виконавчий файл
+            - `Qwasda-Setup-1.4.0-x64.exe` — per-user інсталятор
+            - Контрольні суми: `SHA256SUMS.txt`
 
             ### Встановлення
-            1. Завантажте `Qwasda.exe`
-            2. Запустіть — програма з'явиться в системному треї
-            3. (Опціонально) Клацніть правою кнопкою → "Автозапуск увімкнено"
+            1. Завантажте та запустіть `Qwasda-Setup-1.4.0-x64.exe`
+            2. За потреби виберіть автозапуск Windows
+            3. Для portable-режиму запустіть `Qwasda-1.4.0-x64.exe`
 
             ### Перевірка цілісності
             ```powershell
-            certutil -hashfile Qwasda.exe SHA256
+            certutil -hashfile Qwasda-Setup-1.4.0-x64.exe SHA256
             ```
-            Порівняйте з вмістом `Qwasda.exe.sha256`.
+            Порівняйте з вмістом `SHA256SUMS.txt`.
 
           draft: false
           prerelease: false
           files: |
-            dist/Qwasda.exe
-            dist/Qwasda.exe.sha256
-            dist/Qwasda.exe.md5
+            artifacts/Qwasda-1.4.0-x64.exe
+            artifacts/Qwasda-Setup-1.4.0-x64.exe
+            artifacts/SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -8,12 +8,8 @@ Qwasda — автоматичне перемикання розкладки кл
 import json
 import os
 from contextlib import suppress
-from importlib.metadata import PackageNotFoundError, version
 
-try:
-    __version__ = version("qwasda")
-except PackageNotFoundError:
-    __version__ = "1.3.4"
+from .version import __version__
 
 __author__ = "exeshnizo13"
 __license__ = "MIT"

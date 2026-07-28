@@ -15,6 +15,9 @@ from types import TracebackType
 kernel32 = ctypes.windll.kernel32
 
 ERROR_ALREADY_EXISTS = 183
+SHUTDOWN_EVENT_NAME = "Local\\Qwasda_Shutdown_v1"
+INFINITE = 0xFFFFFFFF
+WAIT_OBJECT_0 = 0
 
 kernel32.CreateMutexW.restype = wintypes.HANDLE
 kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
@@ -26,6 +29,47 @@ kernel32.CloseHandle.restype = wintypes.BOOL
 kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 
 kernel32.GetLastError.restype = wintypes.DWORD
+kernel32.CreateEventW.restype = wintypes.HANDLE
+kernel32.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
+kernel32.OpenEventW.restype = wintypes.HANDLE
+kernel32.OpenEventW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+kernel32.SetEvent.restype = wintypes.BOOL
+kernel32.SetEvent.argtypes = [wintypes.HANDLE]
+kernel32.WaitForSingleObject.restype = wintypes.DWORD
+kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+
+
+def request_shutdown() -> bool:
+    """Signal the running per-user instance to perform a normal cleanup."""
+    handle = kernel32.OpenEventW(0x0002, False, SHUTDOWN_EVENT_NAME)
+    if not handle:
+        return False
+    try:
+        return bool(kernel32.SetEvent(handle))
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+class ShutdownSignal:
+    """Owns the named event used to stop Qwasda during installer upgrades."""
+
+    def __init__(self) -> None:
+        self.handle: wintypes.HANDLE | None = None
+
+    def create(self) -> None:
+        self.handle = kernel32.CreateEventW(None, True, False, SHUTDOWN_EVENT_NAME)
+        if not self.handle:
+            raise OSError("CreateEventW failed")
+
+    def wait(self, timeout: int = INFINITE) -> bool:
+        return bool(
+            self.handle and kernel32.WaitForSingleObject(self.handle, timeout) == WAIT_OBJECT_0
+        )
+
+    def close(self) -> None:
+        if self.handle:
+            kernel32.CloseHandle(self.handle)
+            self.handle = None
 
 
 class SingleInstance:

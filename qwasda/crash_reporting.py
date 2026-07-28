@@ -22,6 +22,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import TextIO
 
+from .version import __version__
+
 # Windows Error Reporting constants
 WER_SUBMIT_HONOR_RECOVERY = 0x1
 WER_SUBMIT_HONOR_RESTART = 0x2
@@ -75,7 +77,7 @@ class CrashReporter:
     - Minidump generation
     """
 
-    def __init__(self, app_name: str = "Qwasda", app_version: str = "1.3.4"):
+    def __init__(self, app_name: str = "Qwasda", app_version: str = __version__):
         self.app_name = app_name
         self.app_version = app_version
         self._original_excepthook: Callable[..., object] | None = None
@@ -263,7 +265,7 @@ _crash_reporter: CrashReporter | None = None
 
 
 def initialize_crash_reporting(
-    app_name: str = "Qwasda", app_version: str = "1.3.4", log_dir: Path | None = None
+    app_name: str = "Qwasda", app_version: str = __version__, log_dir: Path | None = None
 ) -> CrashReporter:
     """Initialize global crash reporter."""
     global _crash_reporter

@@ -10,6 +10,8 @@ a = Analysis(
         ('data/words_uk.txt.gz', 'data'),
     ],
     hiddenimports=['six', 'six.moves'],
+    version='version_info.txt',
+    icon='assets/qwasda.ico',
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

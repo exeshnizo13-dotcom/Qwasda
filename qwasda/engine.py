@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     )
     from .learning import LearningManager
     from .settings_ui import SettingsWindow
-    from .single_instance import SingleInstance
+    from .single_instance import ShutdownSignal, SingleInstance
     from .tray import TrayIcon
     from .win32 import get_foreground_layout
 
@@ -70,7 +70,9 @@ from .hotkeys import (
 from .learning import LearningManager
 from .logging_config import get_logger, initialize_logging, shutdown_logging
 from .settings_ui import SettingsWindow
-from .single_instance import SingleInstance
+from .single_instance import ShutdownSignal, SingleInstance
+from .startup import migrate_legacy_startup
+from .startup import set_enabled as set_startup_enabled
 from .statistics import StatisticsManager
 from .tray import TrayIcon
 from .win32 import (
@@ -105,6 +107,8 @@ class QwasdaEngine:
         self.learning = LearningManager(config)
         self.statistics = StatisticsManager(config.app_dir, enabled=config.statistics_enabled)
         self.single_instance = SingleInstance()
+        self.shutdown_signal = ShutdownSignal()
+        self._shutdown_thread: threading.Thread | None = None
         self.config_manager: ConfigManager | None = None
 
         # State
@@ -154,12 +158,9 @@ class QwasdaEngine:
         self.dict_loader.on_loaded = self._on_dictionaries_loaded
 
     def _get_version(self) -> str:
-        try:
-            from importlib.metadata import version
+        from .version import __version__
 
-            return version("qwasda")
-        except Exception:
-            return "1.3.4"
+        return __version__
 
     # =========================================================================
     # Public API
@@ -224,6 +225,14 @@ class QwasdaEngine:
         if not self.single_instance.acquire():
             ctypes.windll.user32.MessageBoxW(None, "Qwasda вже запущено.", "Qwasda", 0x40)
             return 0
+
+        migrate_legacy_startup()
+        self.shutdown_signal.create()
+        self._message_thread_id = kernel32.GetCurrentThreadId()
+        self._shutdown_thread = threading.Thread(
+            target=self._wait_for_shutdown, name="qwasda-shutdown", daemon=True
+        )
+        self._shutdown_thread.start()
 
         # Load config & learned words
         config_manager = ConfigManager(self.config.app_dir)
@@ -416,6 +425,7 @@ class QwasdaEngine:
             ("keyboard hook", lambda: self.kb_hook.uninstall() if self.kb_hook else None),
             ("worker", lambda: self.worker.shutdown() if self.worker else None),
             ("single instance", self.single_instance.release),
+            ("shutdown signal", self._close_shutdown_signal),
             ("statistics", self._stop_statistics),
             ("logging", shutdown_logging),
             ("crash reporting", shutdown_crash_reporting),
@@ -427,6 +437,14 @@ class QwasdaEngine:
                 logging.getLogger("qwasda.engine").exception(
                     "Cleanup failed", extra={"component": name}
                 )
+
+    def _wait_for_shutdown(self) -> None:
+        if self.shutdown_signal.wait():
+            self._running = False
+            user32.PostThreadMessageW(self._message_thread_id, WM_QUIT, 0, 0)
+
+    def _close_shutdown_signal(self) -> None:
+        self.shutdown_signal.close()
 
     def _signal_handler(self, signum: int, frame: object) -> None:
         self._running = False
@@ -664,21 +682,7 @@ class QwasdaEngine:
             self.tray.update_menu()
 
     def _toggle_startup(self) -> None:
-        startup_dir = (
-            Path(os.environ.get("APPDATA", "")) / r"Microsoft\Windows\Start Menu\Programs\Startup"
-        )
-        bat_path = startup_dir / "Qwasda.bat"
-
-        if bat_path.exists():
-            bat_path.unlink()
-        else:
-            startup_dir.mkdir(parents=True, exist_ok=True)
-            if getattr(sys, "frozen", False):
-                content = f'@echo off\nstart "" "{sys.executable}"\n'
-            else:
-                pw = sys.executable.replace("python.exe", "pythonw.exe")
-                content = f'@echo off\nstart "" "{pw}" "{os.path.abspath(__file__)}"\n'
-            bat_path.write_text(content, encoding="utf-8")
+        set_startup_enabled(not self._startup_enabled())
 
         if self.tray:
             self.tray.update_menu()
@@ -710,6 +714,12 @@ class QwasdaEngine:
         if self.tray:
             self.tray.update_menu()
         return None
+
+    @staticmethod
+    def _startup_enabled() -> bool:
+        from .startup import is_enabled
+
+        return is_enabled()
 
     def _clear_statistics(self) -> str | None:
         self.statistics.clear()
