@@ -17,7 +17,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .config import Config
@@ -462,6 +462,7 @@ class CorrectionWorker:
                 if isinstance(val, tuple):
                     self._send_sep(*val)
                 else:
+                    assert isinstance(val, int)
                     self._send_sep(val, False)
         time.sleep(0.02)
         set_foreground_layout(target)
@@ -479,12 +480,12 @@ class CorrectionWorker:
             if from_layout == LANG_UKRAINIAN:
                 src = scans_to_ukr(scans).lower()
                 tgt = scans_to_eng(scans).lower()
-                if self.dict_loader.dicts_loaded and src in self.dict_loader.dict_uk:
+                if self.dict_loader.dicts_loaded and self.dict_loader.contains_uk(src):
                     continue
             else:
                 src = scans_to_eng(scans).lower()
                 tgt = scans_to_ukr(scans).lower()
-                if self.dict_loader.dicts_loaded and src in self.dict_loader.dict_en:
+                if self.dict_loader.dicts_loaded and self.dict_loader.contains_en(src):
                     continue
             from .conversion import is_word_text
 
@@ -549,7 +550,7 @@ class KeyboardHook:
         self.get_layout = get_layout_func
 
         self._hook: ctypes.c_void_p | None = None
-        self._callback = None
+        self._callback: Any = None
         self._typed_scans: list[Scan] = []
         self._last_hwnd: int | None = None
         self._cached_layout = LANG_ENGLISH
@@ -758,7 +759,7 @@ class MouseHook:
         self.phrase_buffer = phrase_buffer
         self.worker = worker
         self._hook: ctypes.c_void_p | None = None
-        self._callback = None
+        self._callback: Any = None
 
     def install(self, hinst: int) -> bool:
         self._callback = ctypes.WINFUNCTYPE(

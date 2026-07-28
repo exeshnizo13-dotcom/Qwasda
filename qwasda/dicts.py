@@ -13,6 +13,8 @@ import threading
 from array import array
 from collections.abc import Callable
 
+from .custom_dicts import CustomDictionaryManager, CustomDictionaryRecord
+
 
 class SortedWordIndex:
     """
@@ -86,6 +88,7 @@ class DictionaryLoader:
         self.dict_en: frozenset[str] = frozenset()
         self.dict_uk: SortedWordIndex = SortedWordIndex(b"")
         self.dicts_loaded = False
+        self.custom = CustomDictionaryManager(data_dir)
         self._thread: threading.Thread | None = None
         self._logger = logging.getLogger("qwasda.dicts")
 
@@ -171,6 +174,7 @@ class DictionaryLoader:
         self.dict_en = self._load_frozenset("words_en.txt.gz")
         self.dict_uk = self._load_index("words_uk.txt.gz")
         self.dicts_loaded = bool(len(self.dict_en) and len(self.dict_uk))
+        self.custom.load()
         # Update module-level variables for backward compatibility
         global DICT_EN, DICT_UK, dicts_loaded
         DICT_EN = self.dict_en
@@ -188,6 +192,7 @@ class DictionaryLoader:
         self.dict_en = self._load_frozenset("words_en.txt.gz")
         self.dict_uk = self._load_index("words_uk.txt.gz")
         self.dicts_loaded = bool(len(self.dict_en) and len(self.dict_uk))
+        self.custom.load()
         # Update module-level variables
         global DICT_EN, DICT_UK, dicts_loaded
         DICT_EN = self.dict_en
@@ -201,3 +206,18 @@ class DictionaryLoader:
         if self._thread:
             self._thread.join(timeout)
         return self.dicts_loaded
+
+    def contains_en(self, word: str) -> bool:
+        """Check built-in and enabled custom English dictionaries."""
+        return word in self.dict_en or self.custom.contains_en(word)
+
+    def contains_uk(self, word: str) -> bool:
+        """Check built-in and enabled custom Ukrainian dictionaries."""
+        return word in self.dict_uk or self.custom.contains_uk(word)
+
+    @property
+    def custom_records(self) -> tuple[CustomDictionaryRecord, ...]:
+        return self.custom.records
+
+    def reload_custom_dictionaries(self) -> None:
+        self.custom.load()

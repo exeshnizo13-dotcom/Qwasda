@@ -23,7 +23,7 @@ ImageDraw: Any = None
 ImageFont: Any = None
 
 try:
-    import pystray as pystray_module  # type: ignore[import-not-found]
+    import pystray as pystray_module  # type: ignore[import-untyped]
     from PIL import Image as image_module
     from PIL import ImageDraw as image_draw_module
     from PIL import ImageFont as image_font_module
@@ -52,6 +52,7 @@ class TrayIcon:
         on_toggle_learning: Callable[[], None],
         on_forget_learned: Callable[[], None],
         on_toggle_startup: Callable[[], None],
+        on_open_settings: Callable[[], None],
         on_exit: Callable[[], None],
         version: str,
     ):
@@ -65,6 +66,7 @@ class TrayIcon:
         self._toggle_learning_callback = on_toggle_learning
         self._forget_learned_callback = on_forget_learned
         self._toggle_startup_callback = on_toggle_startup
+        self._open_settings_callback = on_open_settings
         self._exit_callback = on_exit
 
         self._icon: Any = None
@@ -187,6 +189,7 @@ class TrayIcon:
                 self._on_toggle_startup,
                 checked=lambda item: self._is_in_startup(),
             ),
+            pystray.MenuItem("Налаштування…", self._on_open_settings),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Вихід", self._on_exit),
         )
@@ -213,6 +216,9 @@ class TrayIcon:
 
     def _on_toggle_startup(self, icon: Any, item: Any) -> None:
         self._toggle_startup_callback()
+
+    def _on_open_settings(self, icon: Any, item: Any) -> None:
+        self._open_settings_callback()
 
     def _on_exit(self, icon: Any, item: Any) -> None:
         self._exit_callback()

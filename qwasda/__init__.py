@@ -30,11 +30,18 @@ from .conversion import (
     ScanBuffer,
     autocorrect_target,
     convert_phrase,
-    is_word_text,
     is_word_terminator,
+    is_word_text,
     manual_target,
     scans_to_eng,
     scans_to_ukr,
+)
+from .custom_dicts import (
+    CustomDictionaryError,
+    CustomDictionaryManager,
+    CustomDictionaryRecord,
+    CustomDictionarySnapshot,
+    DictionaryLanguage,
 )
 from .dicts import DICT_EN, DICT_UK, DictionaryLoader, SortedWordIndex, dicts_loaded
 from .engine import QwasdaEngine
@@ -67,6 +74,7 @@ from .learning import _block_uk as BLOCK_UK
 # These are the canonical sets from learning.py - tests monkeypatch these directly
 from .learning import _force_en as FORCE_EN
 from .learning import _force_uk as FORCE_UK
+from .settings_ui import SettingsWindow
 from .single_instance import SingleInstance
 from .tray import TrayIcon
 from .win32 import (
@@ -202,6 +210,11 @@ __all__ = [
     "Config",
     "LearningManager",
     "DictionaryLoader",
+    "CustomDictionaryError",
+    "CustomDictionaryManager",
+    "CustomDictionaryRecord",
+    "CustomDictionarySnapshot",
+    "DictionaryLanguage",
     "SortedWordIndex",
     "scans_to_eng",
     "scans_to_ukr",
@@ -226,6 +239,7 @@ __all__ = [
     "DoubleTapDetector",
     "TrayIcon",
     "SingleInstance",
+    "SettingsWindow",
     "QwasdaEngine",
     "learn_valid_word",
     "learn_block_word",

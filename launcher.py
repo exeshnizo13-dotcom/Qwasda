@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import os
 import multiprocessing
+import os
 import sys
 import traceback
 from datetime import datetime
@@ -28,6 +28,7 @@ def _write_startup_log(message: str) -> None:
 def _run() -> int:
     _write_startup_log("Launcher started")
     from qwasda.__main__ import main
+
     _write_startup_log("Imported qwasda.__main__.main")
 
     result = main()

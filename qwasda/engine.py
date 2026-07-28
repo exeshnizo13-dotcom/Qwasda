@@ -38,6 +38,7 @@ if TYPE_CHECKING:
         PhraseBuffer,
     )
     from .learning import LearningManager
+    from .settings_ui import SettingsWindow
     from .single_instance import SingleInstance
     from .tray import TrayIcon
     from .win32 import get_foreground_layout
@@ -61,6 +62,7 @@ from .hooks import (
 )
 from .learning import LearningManager
 from .logging_config import get_logger, initialize_logging, shutdown_logging
+from .settings_ui import SettingsWindow
 from .single_instance import SingleInstance
 from .tray import TrayIcon
 from .win32 import (
@@ -113,6 +115,7 @@ class QwasdaEngine:
 
         # Tray
         self.tray: TrayIcon | None = None
+        self.settings: SettingsWindow | None = None
 
         # Layout cache
         self._cached_layout = 0x0409  # Default EN
@@ -134,6 +137,7 @@ class QwasdaEngine:
             "toggle_learning": self._toggle_learning,
             "forget_learned": self._forget_learned,
             "toggle_startup": self._toggle_startup,
+            "open_settings": self._open_settings,
             "exit": self._request_exit,
         }
         self.dict_loader.on_loaded = self._on_dictionaries_loaded
@@ -262,6 +266,11 @@ class QwasdaEngine:
         self.mouse_hook = MouseHook(self.phrase_buffer, self.worker)
         self.mouse_hook.install(hinst)
 
+        self.settings = SettingsWindow(
+            dict_loader=self.dict_loader,
+            on_dictionaries_changed=self._on_custom_dictionaries_changed,
+        )
+
         # Start tray
         self.tray = TrayIcon(
             config=self.config,
@@ -272,6 +281,7 @@ class QwasdaEngine:
             on_toggle_learning=self._tray_callbacks["toggle_learning"],
             on_forget_learned=self._tray_callbacks["forget_learned"],
             on_toggle_startup=self._tray_callbacks["toggle_startup"],
+            on_open_settings=self._tray_callbacks["open_settings"],
             on_exit=self._tray_callbacks["exit"],
             version=self.version,
         )
@@ -366,6 +376,7 @@ class QwasdaEngine:
                 lambda: self._health_monitor.stop() if self._health_monitor else None,
             ),
             ("tray", lambda: self.tray.stop() if self.tray else None),
+            ("settings", lambda: self.settings.stop() if self.settings else None),
             ("mouse hook", lambda: self.mouse_hook.uninstall() if self.mouse_hook else None),
             ("keyboard hook", lambda: self.kb_hook.uninstall() if self.kb_hook else None),
             ("worker", lambda: self.worker.shutdown() if self.worker else None),
@@ -633,6 +644,14 @@ class QwasdaEngine:
                 content = f'@echo off\nstart "" "{pw}" "{os.path.abspath(__file__)}"\n'
             bat_path.write_text(content, encoding="utf-8")
 
+        if self.tray:
+            self.tray.update_menu()
+
+    def _open_settings(self) -> None:
+        if self.settings:
+            self.settings.show("dictionaries")
+
+    def _on_custom_dictionaries_changed(self) -> None:
         if self.tray:
             self.tray.update_menu()
 

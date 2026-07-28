@@ -3,9 +3,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from qwasda import LANG_ENGLISH, LANG_UKRAINIAN, convert_phrase
-
 import qwasda
+from qwasda import LANG_ENGLISH, LANG_UKRAINIAN, convert_phrase
 
 _ENG_TO_SCAN = {c: s for s, c in qwasda.SCAN_ENG.items()}
 
