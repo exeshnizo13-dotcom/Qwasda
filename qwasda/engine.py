@@ -71,6 +71,7 @@ from .learning import LearningManager
 from .logging_config import get_logger, initialize_logging, shutdown_logging
 from .settings_ui import SettingsWindow
 from .single_instance import SingleInstance
+from .statistics import StatisticsManager
 from .tray import TrayIcon
 from .win32 import (
     MODIFIER_VKS,
@@ -102,6 +103,7 @@ class QwasdaEngine:
         # Core components
         self.dict_loader = DictionaryLoader(config.app_dir)
         self.learning = LearningManager(config)
+        self.statistics = StatisticsManager(config.app_dir, enabled=config.statistics_enabled)
         self.single_instance = SingleInstance()
         self.config_manager: ConfigManager | None = None
 
@@ -228,6 +230,11 @@ class QwasdaEngine:
         config_manager.load()
         self.config_manager = config_manager
         self.config = config_manager.config
+        self.statistics = StatisticsManager(
+            self.config.app_dir, enabled=self.config.statistics_enabled
+        )
+        self.statistics.load()
+        self.statistics.start()
         try:
             self.hotkeys.apply(self.config.hotkeys)
         except HotkeyError:
@@ -261,6 +268,7 @@ class QwasdaEngine:
             learning=self.learning,
             config=self.config,
             get_layout_func=self.get_layout,
+            statistics=self.statistics,
         )
 
         # Initialize hooks
@@ -288,6 +296,9 @@ class QwasdaEngine:
             dict_loader=self.dict_loader,
             on_dictionaries_changed=self._on_custom_dictionaries_changed,
             on_hotkeys_changed=self._apply_hotkeys,
+            statistics=self.statistics,
+            on_statistics_enabled=self._apply_statistics_enabled,
+            on_statistics_cleared=self._clear_statistics,
         )
 
         # Start tray
@@ -303,6 +314,7 @@ class QwasdaEngine:
             on_open_settings=self._tray_callbacks["open_settings"],
             on_exit=self._tray_callbacks["exit"],
             version=self.version,
+            statistics=self.statistics,
         )
         self.tray.run()
 
@@ -404,6 +416,7 @@ class QwasdaEngine:
             ("keyboard hook", lambda: self.kb_hook.uninstall() if self.kb_hook else None),
             ("worker", lambda: self.worker.shutdown() if self.worker else None),
             ("single instance", self.single_instance.release),
+            ("statistics", self._stop_statistics),
             ("logging", shutdown_logging),
             ("crash reporting", shutdown_crash_reporting),
         )
@@ -670,9 +683,9 @@ class QwasdaEngine:
         if self.tray:
             self.tray.update_menu()
 
-    def _open_settings(self) -> None:
+    def _open_settings(self, tab: str = "dictionaries") -> None:
         if self.settings:
-            self.settings.show("dictionaries")
+            self.settings.show(tab)
 
     def _stop_settings(self) -> None:
         settings = getattr(self, "settings", None)
@@ -683,6 +696,26 @@ class QwasdaEngine:
         hotkeys = getattr(self, "hotkeys", None)
         if hotkeys is not None:
             hotkeys.close()
+
+    def _stop_statistics(self) -> None:
+        statistics = getattr(self, "statistics", None)
+        if statistics is not None:
+            statistics.stop()
+
+    def _apply_statistics_enabled(self, enabled: bool) -> str | None:
+        self.statistics.set_enabled(enabled)
+        self.config.statistics_enabled = enabled
+        if self.config_manager:
+            self.config_manager.save_config()
+        if self.tray:
+            self.tray.update_menu()
+        return None
+
+    def _clear_statistics(self) -> str | None:
+        self.statistics.clear()
+        if self.tray:
+            self.tray.update_menu()
+        return None
 
     def _apply_hotkeys(self, bindings: HotkeyBindings) -> str | None:
         try:

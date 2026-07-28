@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from .config import Config
     from .dicts import DictionaryLoader
     from .learning import LearningManager
+    from .statistics import StatisticsManager
 
 from .conversion import LETTER_SCANS, PhraseSegment, PhraseToken, Scan
 from .win32 import (
@@ -241,11 +242,13 @@ class CorrectionWorker:
         learning: LearningManager,
         config: Config,
         get_layout_func: Callable[[bool], int],
+        statistics: StatisticsManager | None = None,
     ):
         self.dict_loader = dict_loader
         self.learning = learning
         self.config = config
         self.get_layout = get_layout_func
+        self.statistics = statistics
 
         self._queue: queue.Queue[CorrectionTask | None] = queue.Queue()
         self._lock = threading.Lock()
@@ -355,6 +358,9 @@ class CorrectionWorker:
                     pending, len(task.scans), converted, target, task.sep_vk, task.sep_shifted
                 )
                 self.clear_autocorrect_undo()
+                if self.statistics:
+                    self.statistics.record_layout_switch()
+                    self.statistics.record_autocorrection(len(pending) + 1)
             else:
                 self._replace_single(
                     len(task.scans) + sep_len, converted, target, task.sep_vk, task.sep_shifted
@@ -372,6 +378,9 @@ class CorrectionWorker:
                     self._autocorrect_undo_available = True
                 else:
                     self.clear_autocorrect_undo()
+                if self.statistics:
+                    self.statistics.record_layout_switch()
+                    self.statistics.record_autocorrection()
 
             self._correcting = False
 
@@ -446,6 +455,9 @@ class CorrectionWorker:
                     segments, strip_len, target = result
                     self._replace_phrase(segments, strip_len, target)
                     self.clear_autocorrect_undo()
+                    if self.statistics:
+                        self.statistics.record_layout_switch()
+                        self.statistics.record_manual_conversion()
                     # Learn words if enabled
                     if self.config.learning_enabled:
                         self._learn_from_phrase(phrase, layout, target)

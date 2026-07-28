@@ -40,6 +40,7 @@ class Config:
     min_en_to_uk: int = 3
     double_tap_window: float = 0.4
     hotkeys: HotkeyBindings = field(default_factory=default_hotkeys)
+    statistics_enabled: bool = False
     app_dir: str = ""
 
     def __post_init__(self) -> None:
@@ -125,6 +126,8 @@ class ConfigManager:
                 ):
                     self._config.double_tap_window = float(data["double_tap_window"])
                 self._config.hotkeys = parse_hotkeys(data.get("hotkeys"))
+                if "statistics_enabled" in data and isinstance(data["statistics_enabled"], bool):
+                    self._config.statistics_enabled = data["statistics_enabled"]
         except (OSError, json.JSONDecodeError):
             pass  # Keep defaults
 

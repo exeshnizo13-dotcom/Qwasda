@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from .config import Config
     from .dicts import DictionaryLoader
     from .learning import LearningManager
+    from .statistics import StatisticsManager
 
 pystray: Any = None
 Image: Any = None
@@ -52,14 +53,16 @@ class TrayIcon:
         on_toggle_learning: Callable[[], None],
         on_forget_learned: Callable[[], None],
         on_toggle_startup: Callable[[], None],
-        on_open_settings: Callable[[], None],
+        on_open_settings: Callable[..., None],
         on_exit: Callable[[], None],
         version: str,
+        statistics: StatisticsManager,
     ):
         self.config = config
         self.learning = learning
         self.dict_loader = dict_loader
         self.version = version
+        self.statistics = statistics
 
         self._toggle_enabled_callback = on_toggle_enabled
         self._toggle_auto_callback = on_toggle_auto
@@ -190,6 +193,7 @@ class TrayIcon:
                 checked=lambda item: self._is_in_startup(),
             ),
             pystray.MenuItem("Налаштування…", self._on_open_settings),
+            pystray.MenuItem("Статистика…", self._on_open_statistics),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Вихід", self._on_exit),
         )
@@ -218,7 +222,10 @@ class TrayIcon:
         self._toggle_startup_callback()
 
     def _on_open_settings(self, icon: Any, item: Any) -> None:
-        self._open_settings_callback()
+        self._open_settings_callback("dictionaries")
+
+    def _on_open_statistics(self, icon: Any, item: Any) -> None:
+        self._open_settings_callback("statistics")
 
     def _on_exit(self, icon: Any, item: Any) -> None:
         self._exit_callback()

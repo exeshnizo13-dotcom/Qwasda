@@ -19,6 +19,7 @@ from .hotkeys import (
     current_modifier_mask,
     default_hotkeys,
 )
+from .statistics import StatisticsManager
 from .win32 import (
     VK_CONTROL,
     VK_ESCAPE,
@@ -46,11 +47,17 @@ class SettingsWindow:
         dict_loader: DictionaryLoader,
         on_dictionaries_changed: Callable[[], None],
         on_hotkeys_changed: Callable[[HotkeyBindings], str | None],
+        statistics: StatisticsManager,
+        on_statistics_enabled: Callable[[bool], str | None],
+        on_statistics_cleared: Callable[[], str | None],
     ):
         self.config = config
         self.dict_loader = dict_loader
         self.on_dictionaries_changed = on_dictionaries_changed
         self.on_hotkeys_changed = on_hotkeys_changed
+        self.statistics = statistics
+        self.on_statistics_enabled = on_statistics_enabled
+        self.on_statistics_cleared = on_statistics_cleared
         self._commands: queue.Queue[tuple[str, str | None]] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
@@ -353,9 +360,65 @@ class SettingsWindow:
         )
         refresh_hotkeys()
 
+        statistics_tab = ttk.Frame(notebook)
+        notebook.add(statistics_tab, text="Статистика")
+        statistics_enabled = tk.BooleanVar(value=self.statistics.enabled)
+        stats_today = ttk.Label(statistics_tab)
+        stats_lifetime = ttk.Label(statistics_tab)
+        ttk.Checkbutton(
+            statistics_tab,
+            text="Збирати анонімні агреговані лічильники",
+            variable=statistics_enabled,
+            command=lambda: apply_statistics_enabled(),
+        ).pack(anchor="w", padx=12, pady=(18, 12))
+        stats_today.pack(anchor="w", padx=12, pady=4)
+        stats_lifetime.pack(anchor="w", padx=12, pady=4)
+
+        def refresh_statistics() -> None:
+            snapshot = self.statistics.snapshot
+            stats_today.configure(
+                text=(
+                    f"Сьогодні: перемикань {snapshot.today_layout_switches}, "
+                    f"автокорекцій {snapshot.today_autocorrections}, "
+                    f"ручних конвертацій {snapshot.today_manual_conversions}"
+                )
+            )
+            stats_lifetime.configure(
+                text=(
+                    f"За весь час: перемикань {snapshot.lifetime_layout_switches}, "
+                    f"автокорекцій {snapshot.lifetime_autocorrections}, "
+                    f"ручних конвертацій {snapshot.lifetime_manual_conversions}"
+                )
+            )
+
+        def apply_statistics_enabled() -> None:
+            error = self.on_statistics_enabled(bool(statistics_enabled.get()))
+            if error:
+                statistics_enabled.set(self.statistics.enabled)
+                messagebox.showerror("Не вдалося змінити статистику", error, parent=root)
+            refresh_statistics()
+
+        def clear_statistics() -> None:
+            if not messagebox.askyesno(
+                "Очистити статистику",
+                "Видалити всі агреговані лічильники?",
+                parent=root,
+            ):
+                return
+            error = self.on_statistics_cleared()
+            if error:
+                messagebox.showerror("Не вдалося очистити статистику", error, parent=root)
+            refresh_statistics()
+
+        ttk.Button(statistics_tab, text="Очистити статистику", command=clear_statistics).pack(
+            anchor="w", padx=12, pady=18
+        )
+        refresh_statistics()
+
         tabs: dict[str, Any] = {
             "dictionaries": dictionaries_tab,
             "hotkeys": hotkeys_tab,
+            "statistics": statistics_tab,
         }
 
         def poll_commands() -> None:
@@ -374,6 +437,7 @@ class SettingsWindow:
                         root.focus_force()
             except queue.Empty:
                 pass
+            refresh_statistics()
             root.after(100, poll_commands)
 
         refresh()

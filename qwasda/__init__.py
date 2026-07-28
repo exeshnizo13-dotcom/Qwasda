@@ -84,6 +84,7 @@ from .learning import _force_en as FORCE_EN
 from .learning import _force_uk as FORCE_UK
 from .settings_ui import SettingsWindow
 from .single_instance import SingleInstance
+from .statistics import StatisticsManager, UsageStatsSnapshot
 from .tray import TrayIcon
 from .win32 import (
     CTRL_VKS,
@@ -254,6 +255,8 @@ __all__ = [
     "TrayIcon",
     "SingleInstance",
     "SettingsWindow",
+    "StatisticsManager",
+    "UsageStatsSnapshot",
     "QwasdaEngine",
     "learn_valid_word",
     "learn_block_word",
