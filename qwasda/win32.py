@@ -51,6 +51,7 @@ WM_KEYUP = 0x0101
 WM_SYSKEYDOWN = 0x0104
 WM_SYSKEYUP = 0x0105
 WM_QUIT = 0x0012
+WM_HOTKEY = 0x0312
 WM_INPUTLANGCHANGEREQUEST = 0x0050
 
 WM_LBUTTONDOWN = 0x0201
@@ -267,6 +268,11 @@ kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
 kernel32.CloseHandle.restype = wintypes.BOOL
 kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 kernel32.GetLastError.restype = wintypes.DWORD
+
+user32.RegisterHotKey.restype = wintypes.BOOL
+user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
+user32.UnregisterHotKey.restype = wintypes.BOOL
+user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
 
 
 # =============================================================================

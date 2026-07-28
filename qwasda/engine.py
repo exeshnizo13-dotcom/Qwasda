@@ -60,6 +60,13 @@ from .hooks import (
     MouseHook,
     PhraseBuffer,
 )
+from .hotkeys import (
+    HotkeyAction,
+    HotkeyBindings,
+    HotkeyError,
+    HotkeyManager,
+    default_hotkeys,
+)
 from .learning import LearningManager
 from .logging_config import get_logger, initialize_logging, shutdown_logging
 from .settings_ui import SettingsWindow
@@ -71,6 +78,7 @@ from .win32 import (
     VK_BACK,
     VK_CAPITAL,
     VK_SHIFT,
+    WM_HOTKEY,
     WM_QUIT,
     WORD_BREAK_VKS,
     any_modifier_down,
@@ -107,6 +115,7 @@ class QwasdaEngine:
         self.phrase_buffer = PhraseBuffer()
         self.caret_guard = CaretGuard()
         self.double_tap = DoubleTapDetector()
+        self.hotkeys = HotkeyManager()
 
         # Hooks
         self.kb_hook: KeyboardHook | None = None
@@ -219,6 +228,14 @@ class QwasdaEngine:
         config_manager.load()
         self.config_manager = config_manager
         self.config = config_manager.config
+        try:
+            self.hotkeys.apply(self.config.hotkeys)
+        except HotkeyError:
+            logger.exception("Configured hotkeys unavailable; restoring defaults")
+            self.config.hotkeys = default_hotkeys()
+            self.hotkeys.apply(self.config.hotkeys)
+            config_manager.save_config()
+        self.double_tap.set_trigger_vks(self.hotkeys.double_tap_vks())
         # LearningManager loads in __init__
 
         # Apply config to engine state
@@ -267,8 +284,10 @@ class QwasdaEngine:
         self.mouse_hook.install(hinst)
 
         self.settings = SettingsWindow(
+            config=self.config,
             dict_loader=self.dict_loader,
             on_dictionaries_changed=self._on_custom_dictionaries_changed,
+            on_hotkeys_changed=self._apply_hotkeys,
         )
 
         # Start tray
@@ -320,6 +339,9 @@ class QwasdaEngine:
             ret = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
             if ret <= 0:
                 break
+            if msg.message == WM_HOTKEY:
+                self._handle_hotkey(int(msg.wParam))
+                continue
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
 
@@ -376,7 +398,8 @@ class QwasdaEngine:
                 lambda: self._health_monitor.stop() if self._health_monitor else None,
             ),
             ("tray", lambda: self.tray.stop() if self.tray else None),
-            ("settings", lambda: self.settings.stop() if self.settings else None),
+            ("settings", self._stop_settings),
+            ("hotkeys", self._close_hotkeys),
             ("mouse hook", lambda: self.mouse_hook.uninstall() if self.mouse_hook else None),
             ("keyboard hook", lambda: self.kb_hook.uninstall() if self.kb_hook else None),
             ("worker", lambda: self.worker.shutdown() if self.worker else None),
@@ -650,6 +673,51 @@ class QwasdaEngine:
     def _open_settings(self) -> None:
         if self.settings:
             self.settings.show("dictionaries")
+
+    def _stop_settings(self) -> None:
+        settings = getattr(self, "settings", None)
+        if settings is not None:
+            settings.stop()
+
+    def _close_hotkeys(self) -> None:
+        hotkeys = getattr(self, "hotkeys", None)
+        if hotkeys is not None:
+            hotkeys.close()
+
+    def _apply_hotkeys(self, bindings: HotkeyBindings) -> str | None:
+        try:
+            self.hotkeys.apply(bindings)
+        except HotkeyError as exc:
+            return str(exc)
+        self.config.hotkeys = self.hotkeys.bindings
+        self.double_tap.set_trigger_vks(self.hotkeys.double_tap_vks())
+        if self.config_manager:
+            self.config_manager.save_config()
+        if self.tray:
+            self.tray.update_menu()
+        return None
+
+    def _handle_hotkey(self, hotkey_id: int) -> None:
+        if not self._running or self.worker is None or self.worker._correcting:
+            return
+        action = self.hotkeys.action_for_id(hotkey_id)
+        if action == HotkeyAction.MANUAL_CONVERSION:
+            if self._enabled.is_set():
+                self.worker.enqueue(
+                    CorrectionTask(
+                        scans=[],
+                        layout=0,
+                        sep_vk=0,
+                        sep_shifted=False,
+                        seq=0,
+                        is_manual=True,
+                        phrase=self.phrase_buffer.copy(),
+                    )
+                )
+        elif action == HotkeyAction.TOGGLE_ENABLED:
+            self._toggle_enabled()
+        elif action == HotkeyAction.TOGGLE_AUTOCORRECT:
+            self._toggle_auto()
 
     def _on_custom_dictionaries_changed(self) -> None:
         if self.tray:

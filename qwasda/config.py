@@ -7,8 +7,10 @@ Handles loading/saving config.json and learned.json with validation.
 import json
 import os
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, cast
+
+from .hotkeys import HotkeyBindings, default_hotkeys, parse_hotkeys, serialize_hotkeys
 
 
 def _get_qwasda_learned_sets() -> tuple[set[str], set[str], set[str], set[str]]:
@@ -37,6 +39,7 @@ class Config:
     min_autocorrect_len: int = 2
     min_en_to_uk: int = 3
     double_tap_window: float = 0.4
+    hotkeys: HotkeyBindings = field(default_factory=default_hotkeys)
     app_dir: str = ""
 
     def __post_init__(self) -> None:
@@ -121,6 +124,7 @@ class ConfigManager:
                     and data["double_tap_window"] > 0
                 ):
                     self._config.double_tap_window = float(data["double_tap_window"])
+                self._config.hotkeys = parse_hotkeys(data.get("hotkeys"))
         except (OSError, json.JSONDecodeError):
             pass  # Keep defaults
 
@@ -150,7 +154,9 @@ class ConfigManager:
             os.makedirs(self.app_dir, exist_ok=True)
             tmp = self.config_path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(asdict(self._config), f, ensure_ascii=False, indent=2)
+                data = asdict(self._config)
+                data["hotkeys"] = serialize_hotkeys(self._config.hotkeys)
+                json.dump(data, f, ensure_ascii=False, indent=2)
             os.replace(tmp, self.config_path)
         except OSError:
             pass  # Non-fatal

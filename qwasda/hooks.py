@@ -106,6 +106,13 @@ class DoubleTapDetector:
     def is_trigger(self, vk: int) -> bool:
         return vk in self._trigger_vks
 
+    def set_trigger_vks(self, trigger_vks: frozenset[int]) -> None:
+        """Replace the configured double-tap modifiers and reset partial state."""
+        self._trigger_vks = trigger_vks
+        self._last_tap = 0.0
+        self._down = False
+        self._interrupted = True
+
 
 # =============================================================================
 # Caret Guard (suppresses auto-correct after navigation)

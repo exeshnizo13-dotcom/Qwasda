@@ -53,6 +53,14 @@ from .hooks import (
     MouseHook,
     PhraseBuffer,
 )
+from .hotkeys import (
+    HotkeyAction,
+    HotkeyBinding,
+    HotkeyError,
+    HotkeyManager,
+    binding_to_text,
+    default_hotkeys,
+)
 from .learning import (
     LearningManager,
     _block_en,
@@ -237,6 +245,12 @@ __all__ = [
     "PhraseBuffer",
     "CaretGuard",
     "DoubleTapDetector",
+    "HotkeyAction",
+    "HotkeyBinding",
+    "HotkeyError",
+    "HotkeyManager",
+    "binding_to_text",
+    "default_hotkeys",
     "TrayIcon",
     "SingleInstance",
     "SettingsWindow",
