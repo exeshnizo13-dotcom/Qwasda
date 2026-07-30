@@ -45,6 +45,7 @@ SCAN_ENG = {
 }
 
 SCAN_UKR = {
+    0x29: "'",
     0x10: "й",
     0x11: "ц",
     0x12: "у",
@@ -84,6 +85,7 @@ SCAN_UKR = {
 ENG_AT_POS = dict(SCAN_ENG)
 ENG_AT_POS.update(
     {
+        0x29: "`",
         0x1A: "[",
         0x1B: "]",
         0x27: ";",
@@ -95,6 +97,21 @@ ENG_AT_POS.update(
 )
 
 LETTER_SCANS = frozenset(SCAN_UKR.keys()) | frozenset(SCAN_ENG.keys())
+# These positions are letters in Ukrainian but punctuation in English.  They
+# must stay in the scan buffer until a word boundary tells us which reading is
+# intended.
+UKRAINIAN_OEM_LETTER_SCANS = frozenset(SCAN_UKR.keys()) - frozenset(SCAN_ENG.keys())
+
+_SHIFTED_ENG_AT_POS = {
+    0x29: "~",
+    0x1A: "{",
+    0x1B: "}",
+    0x27: ":",
+    0x28: '"',
+    0x33: "<",
+    0x34: ">",
+    0x2B: "|",
+}
 
 # Valid single-letter words for auto-correction
 UK_SINGLE_WORDS = frozenset("аійоуязєбжв")  # а і й о у я з є б ж в
@@ -173,12 +190,23 @@ def _read_scans(scans: list[Scan], table: dict[int, str]) -> str:
     return "".join(out)
 
 
+def _read_english_scans(scans: list[Scan]) -> str:
+    """Read scans in English without turning shifted punctuation into itself."""
+    out = []
+    for sc, shifted in scans:
+        ch = ENG_AT_POS.get(sc, "")
+        if shifted:
+            ch = _SHIFTED_ENG_AT_POS.get(sc, ch.upper())
+        out.append(ch)
+    return "".join(out)
+
+
 def scans_to_ukr(scans: list[Scan]) -> str:
     return _read_scans(scans, SCAN_UKR)
 
 
 def scans_to_eng(scans: list[Scan]) -> str:
-    return _read_scans(scans, ENG_AT_POS)
+    return _read_english_scans(scans)
 
 
 def is_word_text(text: str) -> bool:
@@ -283,6 +311,65 @@ def autocorrect_target(
             return ukr, LANG_UKRAINIAN
 
     return None, None
+
+
+def autocorrect_replacement(
+    scans: list[Scan],
+    layout: int,
+    dict_loader: DictionaryLoader,
+    learning: LearningManager,
+    min_autocorrect_len: int,
+    min_en_to_uk: int,
+) -> tuple[str | None, int | None]:
+    """
+    Return replacement text for an auto-correction at a word boundary.
+
+    Ukrainian OEM-letter positions are ambiguous while the English layout is
+    active: ``[nj`` is the word ``хто``, whereas ``hello;`` contains ordinary
+    English punctuation.  Prefer the whole scan sequence as one Ukrainian
+    word; only split it at those positions when that interpretation fails.
+    """
+    from .win32 import LANG_ENGLISH, LANG_UKRAINIAN
+
+    converted, target = autocorrect_target(
+        scans, layout, dict_loader, learning, min_autocorrect_len, min_en_to_uk
+    )
+    if converted is not None:
+        return converted, target
+
+    has_ukrainian_oem_letter = any(sc in UKRAINIAN_OEM_LETTER_SCANS for sc, _ in scans)
+    if layout != LANG_ENGLISH or not has_ukrainian_oem_letter:
+        return None, None
+
+    parts: list[str] = []
+    word_scans: list[Scan] = []
+    corrected = False
+
+    def flush_word() -> None:
+        nonlocal corrected
+        if not word_scans:
+            return
+        text, word_target = autocorrect_target(
+            word_scans, layout, dict_loader, learning, min_autocorrect_len, min_en_to_uk
+        )
+        if text is not None and word_target == LANG_UKRAINIAN:
+            parts.append(text)
+            corrected = True
+        else:
+            parts.append(scans_to_eng(word_scans))
+        word_scans.clear()
+
+    for scan in scans:
+        if scan[0] in UKRAINIAN_OEM_LETTER_SCANS:
+            flush_word()
+            parts.append(scans_to_eng([scan]))
+        else:
+            word_scans.append(scan)
+    flush_word()
+
+    if not corrected:
+        return None, None
+    return "".join(parts), LANG_UKRAINIAN
 
 
 def convert_phrase(

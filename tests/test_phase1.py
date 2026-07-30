@@ -150,3 +150,65 @@ def test_engine_cleanup_is_idempotent_and_cleans_in_reverse_order(monkeypatch):
         (id(app.worker), "shutdown"),
     ]
     assert app._cleanup_done
+
+
+def test_exit_callback_posts_quit_to_main_message_thread(monkeypatch):
+    from qwasda import engine
+
+    posted = []
+    app = engine.QwasdaEngine.__new__(engine.QwasdaEngine)
+    app._running = True
+    app._message_thread_id = 4242
+    app.tray = MagicMock()
+    monkeypatch.setattr(
+        engine.user32,
+        "PostThreadMessageW",
+        lambda thread_id, message, wparam, lparam: posted.append(
+            (thread_id, message, wparam, lparam)
+        ),
+    )
+
+    app._request_exit()
+
+    assert not app._running
+    assert posted == [(4242, engine.WM_QUIT, 0, 0)]
+    app.tray.stop.assert_called_once_with()
+
+
+def test_correction_worker_state_lock_is_reentrant():
+    from qwasda.hooks import CorrectionWorker
+
+    worker = CorrectionWorker(
+        dict_loader=MagicMock(),
+        learning=MagicMock(),
+        config=MagicMock(),
+        get_layout_func=MagicMock(return_value=0x0409),
+    )
+    try:
+        assert worker._lock.acquire(blocking=False)
+        try:
+            assert worker._lock.acquire(blocking=False)
+            worker._lock.release()
+        finally:
+            worker._lock.release()
+    finally:
+        worker.shutdown()
+
+
+def test_mouse_click_resets_keyboard_context_and_suppresses_fragment_correction():
+    from qwasda.hooks import MouseHook
+
+    phrase_buffer = MagicMock()
+    worker = MagicMock()
+    keyboard_hook = MagicMock()
+    caret_guard = MagicMock()
+    mouse_hook = MouseHook(phrase_buffer, worker, keyboard_hook, caret_guard)
+
+    mouse_hook._reset_input_context()
+
+    worker.increment_seq.assert_called_once_with()
+    keyboard_hook.clear_typed_scans.assert_called_once_with()
+    phrase_buffer.clear.assert_called_once_with()
+    worker._pending_corrections.clear.assert_called_once_with()
+    worker.clear_autocorrect_undo.assert_called_once_with()
+    caret_guard.on_nav.assert_called_once_with()

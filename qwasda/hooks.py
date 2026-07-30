@@ -29,6 +29,7 @@ from .conversion import LETTER_SCANS, PhraseSegment, PhraseToken, Scan
 from .win32 import (
     CTRL_VKS,
     DOWN_MSGS,
+    HOOKPROC,
     KBDLLHOOKSTRUCT,
     LANG_ENGLISH,
     LANG_UKRAINIAN,
@@ -251,7 +252,10 @@ class CorrectionWorker:
         self.statistics = statistics
 
         self._queue: queue.Queue[CorrectionTask | None] = queue.Queue()
-        self._lock = threading.Lock()
+        # Correction paths update undo state while already holding this lock.
+        # An RLock keeps those nested state transitions from deadlocking the
+        # worker after the first batched or manual conversion.
+        self._lock = threading.RLock()
         self._correcting = False
         self._input_seq = 0
         self._pending_corrections: list[tuple[int, str, int, int, bool]] = []
@@ -302,7 +306,7 @@ class CorrectionWorker:
     # -------------------------------------------------------------------------
 
     def _do_auto(self, task: CorrectionTask) -> None:
-        from .conversion import autocorrect_target
+        from .conversion import autocorrect_replacement
 
         with self._lock:
             if self._correcting:
@@ -315,7 +319,7 @@ class CorrectionWorker:
             # Check if user kept typing (underlying layout may have changed
             layout = self.get_layout(True)
 
-            converted, target = autocorrect_target(
+            converted, target = autocorrect_replacement(
                 task.scans,
                 layout,
                 self.dict_loader,
@@ -576,9 +580,7 @@ class KeyboardHook:
         self._cached_layout_time = 0.0
 
     def install(self, hinst: int) -> bool:
-        self._callback = ctypes.WINFUNCTYPE(
-            ctypes.c_long, ctypes.c_int, ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM
-        )(self._hook_proc)
+        self._callback = HOOKPROC(self._hook_proc)
         self._hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._callback, hinst, 0)
         return self._hook is not None
 
@@ -591,6 +593,10 @@ class KeyboardHook:
     def is_installed(self) -> bool:
         """Check if hook is installed."""
         return self._hook is not None
+
+    def clear_typed_scans(self) -> None:
+        """Discard the partial word when the caret moves outside this hook."""
+        self._typed_scans.clear()
 
     def _hook_proc(self, nCode: int, wParam: int, lParam: int) -> int:
         if nCode < 0:
@@ -774,16 +780,22 @@ class KeyboardHook:
 class MouseHook:
     """Low-level mouse hook to clear buffers on click."""
 
-    def __init__(self, phrase_buffer: PhraseBuffer, worker: CorrectionWorker):
+    def __init__(
+        self,
+        phrase_buffer: PhraseBuffer,
+        worker: CorrectionWorker,
+        keyboard_hook: KeyboardHook,
+        caret_guard: CaretGuard,
+    ):
         self.phrase_buffer = phrase_buffer
         self.worker = worker
+        self.keyboard_hook = keyboard_hook
+        self.caret_guard = caret_guard
         self._hook: ctypes.c_void_p | None = None
         self._callback: Any = None
 
     def install(self, hinst: int) -> bool:
-        self._callback = ctypes.WINFUNCTYPE(
-            ctypes.c_long, ctypes.c_int, ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM
-        )(self._hook_proc)
+        self._callback = HOOKPROC(self._hook_proc)
         self._hook = user32.SetWindowsHookExW(WH_MOUSE_LL, self._callback, hinst, 0)
         return self._hook is not None
 
@@ -805,6 +817,14 @@ class MouseHook:
         if ms.flags & LLMHF_INJECTED:
             return _call_next_hook(self._hook, nCode, wParam, lParam)
 
+        self._reset_input_context()
+        return _call_next_hook(self._hook, nCode, wParam, lParam)
+
+    def _reset_input_context(self) -> None:
+        """Invalidate buffered text after a real click moves the caret."""
+        self.worker.increment_seq()
+        self.keyboard_hook.clear_typed_scans()
         self.phrase_buffer.clear()
         self.worker._pending_corrections.clear()
-        return _call_next_hook(self._hook, nCode, wParam, lParam)
+        self.worker.clear_autocorrect_undo()
+        self.caret_guard.on_nav()

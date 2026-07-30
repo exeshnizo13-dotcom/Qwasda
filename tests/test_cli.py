@@ -5,7 +5,16 @@ from qwasda import __main__
 
 def test_version_command(capsys):
     assert __main__.main(["--version"]) == 0
-    assert capsys.readouterr().out.strip() == "1.4.0"
+    assert capsys.readouterr().out.strip() == "1.5.0"
+
+
+def test_version_command_uses_windows_handle_without_console(monkeypatch):
+    output = []
+    monkeypatch.setattr(__main__.sys, "stdout", None)
+    monkeypatch.setattr(__main__, "_write_windows_stdout", lambda text: output.append(text))
+
+    assert __main__.main(["--version"]) == 0
+    assert output == ["1.5.0\n"]
 
 
 def test_smoke_test_command():

@@ -209,10 +209,16 @@ if ctypes.sizeof(INPUT) not in (28, 40):
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
+# LRESULT is a signed pointer-sized value (LONG_PTR), not C ``long``.
+# Using c_long here truncates hook return values in 64-bit builds and can
+# corrupt the low-level hook chain with a native access violation.
+LRESULT = ctypes.c_ssize_t
+HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
 user32.SetWindowsHookExW.restype = ctypes.c_void_p
 user32.SetWindowsHookExW.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD]
 
-user32.CallNextHookEx.restype = ctypes.c_long
+user32.CallNextHookEx.restype = LRESULT
 user32.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
 
 user32.UnhookWindowsHookEx.restype = wintypes.BOOL

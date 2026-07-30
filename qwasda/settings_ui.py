@@ -20,6 +20,7 @@ from .hotkeys import (
     default_hotkeys,
 )
 from .statistics import StatisticsManager
+from .updater import UpdateChannel, UpdateManager
 from .win32 import (
     VK_CONTROL,
     VK_ESCAPE,
@@ -50,6 +51,10 @@ class SettingsWindow:
         statistics: StatisticsManager,
         on_statistics_enabled: Callable[[bool], str | None],
         on_statistics_cleared: Callable[[], str | None],
+        updater: UpdateManager,
+        on_updates_enabled: Callable[[bool], str | None],
+        on_update_channel: Callable[[UpdateChannel], str | None],
+        on_update_apply: Callable[[], str | None],
     ):
         self.config = config
         self.dict_loader = dict_loader
@@ -58,6 +63,10 @@ class SettingsWindow:
         self.statistics = statistics
         self.on_statistics_enabled = on_statistics_enabled
         self.on_statistics_cleared = on_statistics_cleared
+        self.updater = updater
+        self.on_updates_enabled = on_updates_enabled
+        self.on_update_channel = on_update_channel
+        self.on_update_apply = on_update_apply
         self._commands: queue.Queue[tuple[str, str | None]] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
@@ -415,10 +424,103 @@ class SettingsWindow:
         )
         refresh_statistics()
 
+        updates_tab = ttk.Frame(notebook)
+        notebook.add(updates_tab, text="Оновлення")
+        updates_enabled = tk.BooleanVar(value=self.config.update_checks_enabled)
+        channel_var = tk.StringVar(value=self.config.update_channel.value)
+        update_status = ttk.Label(updates_tab, wraplength=620)
+        update_progress = ttk.Label(updates_tab)
+        update_notes = ttk.Label(updates_tab, justify="left", wraplength=620)
+        ttk.Label(
+            updates_tab,
+            text="Qwasda не звертається до мережі без вашої згоди. Автоматичні перевірки можна вимкнути будь-коли.",
+            wraplength=620,
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=(12, 0))
+
+        def apply_updates_enabled() -> None:
+            error = self.on_updates_enabled(bool(updates_enabled.get()))
+            if error:
+                updates_enabled.set(self.config.update_checks_enabled)
+                messagebox.showerror("Не вдалося змінити updater", error, parent=root)
+
+        def apply_update_channel(_event: Any = None) -> None:
+            try:
+                selected = UpdateChannel(channel_var.get())
+            except ValueError:
+                channel_var.set(self.config.update_channel.value)
+                return
+            error = self.on_update_channel(selected)
+            if error:
+                channel_var.set(self.config.update_channel.value)
+                messagebox.showerror("Не вдалося змінити канал", error, parent=root)
+
+        ttk.Checkbutton(
+            updates_tab,
+            text="Автоматично перевіряти оновлення (раз на добу)",
+            variable=updates_enabled,
+            command=apply_updates_enabled,
+        ).pack(anchor="w", padx=12, pady=(18, 10))
+        channel_row = ttk.Frame(updates_tab)
+        channel_row.pack(anchor="w", padx=12, pady=4)
+        ttk.Label(channel_row, text="Канал:").pack(side="left")
+        channel_box = ttk.Combobox(
+            channel_row,
+            textvariable=channel_var,
+            values=(UpdateChannel.STABLE.value, UpdateChannel.BETA.value),
+            state="readonly",
+            width=10,
+        )
+        channel_box.pack(side="left", padx=8)
+        channel_box.bind("<<ComboboxSelected>>", apply_update_channel)
+        update_status.pack(anchor="w", padx=12, pady=(12, 4))
+        update_progress.pack(anchor="w", padx=12, pady=4)
+        update_notes.pack(anchor="w", padx=12, pady=4)
+        ttk.Button(updates_tab, text="Перевірити зараз", command=lambda: self.updater.check()).pack(
+            anchor="w", padx=12, pady=4
+        )
+        ttk.Button(updates_tab, text="Завантажити", command=lambda: self.updater.download()).pack(
+            anchor="w", padx=12, pady=4
+        )
+        ttk.Button(updates_tab, text="Скасувати", command=self.updater.cancel).pack(
+            anchor="w", padx=12, pady=4
+        )
+
+        def apply_update() -> None:
+            error = self.on_update_apply()
+            if error:
+                messagebox.showerror("Не вдалося застосувати оновлення", error, parent=root)
+
+        ttk.Button(updates_tab, text="Завантажити й установити", command=apply_update).pack(
+            anchor="w", padx=12, pady=4
+        )
+
+        def refresh_updates() -> None:
+            snapshot = self.updater.snapshot
+            status = {
+                "idle": "Перевірку ще не запускали.",
+                "checking": "Перевіряємо GitHub Releases…",
+                "up-to-date": f"Встановлено останню доступну версію {snapshot.current_version}.",
+                "available": f"Доступна версія {snapshot.available.version if snapshot.available else ''}.",
+                "downloading": "Завантаження оновлення…",
+                "downloaded": "Оновлення перевірено та готове до встановлення.",
+                "error": snapshot.error or "Помилка updater.",
+            }.get(snapshot.status, snapshot.status)
+            update_status.configure(text=status)
+            update_progress.configure(
+                text=(
+                    f"{snapshot.progress.received}/{snapshot.progress.total} байт"
+                    if snapshot.progress.total
+                    else ""
+                )
+            )
+            update_notes.configure(text=snapshot.available.notes if snapshot.available else "")
+
         tabs: dict[str, Any] = {
             "dictionaries": dictionaries_tab,
             "hotkeys": hotkeys_tab,
             "statistics": statistics_tab,
+            "updates": updates_tab,
         }
 
         def poll_commands() -> None:
@@ -438,6 +540,7 @@ class SettingsWindow:
             except queue.Empty:
                 pass
             refresh_statistics()
+            refresh_updates()
             root.after(100, poll_commands)
 
         refresh()

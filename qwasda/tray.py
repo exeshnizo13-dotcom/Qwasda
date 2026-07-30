@@ -57,6 +57,7 @@ class TrayIcon:
         on_exit: Callable[[], None],
         version: str,
         statistics: StatisticsManager,
+        on_check_updates: Callable[[], None] | None = None,
     ):
         self.config = config
         self.learning = learning
@@ -71,6 +72,7 @@ class TrayIcon:
         self._toggle_startup_callback = on_toggle_startup
         self._open_settings_callback = on_open_settings
         self._exit_callback = on_exit
+        self._check_updates_callback = on_check_updates or (lambda: None)
 
         self._icon: Any = None
         self._running = False
@@ -194,6 +196,7 @@ class TrayIcon:
             ),
             pystray.MenuItem("Налаштування…", self._on_open_settings),
             pystray.MenuItem("Статистика…", self._on_open_statistics),
+            pystray.MenuItem("Перевірити оновлення…", self._on_check_updates),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Вихід", self._on_exit),
         )
@@ -223,6 +226,9 @@ class TrayIcon:
 
     def _on_open_statistics(self, icon: Any, item: Any) -> None:
         self._open_settings_callback("statistics")
+
+    def _on_check_updates(self, icon: Any, item: Any) -> None:
+        self._check_updates_callback()
 
     def _on_exit(self, icon: Any, item: Any) -> None:
         self._exit_callback()

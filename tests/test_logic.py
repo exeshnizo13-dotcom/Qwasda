@@ -14,6 +14,11 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import qwasda  # noqa: E402
+from qwasda.conversion import (  # noqa: E402
+    LETTER_SCANS,
+    UKRAINIAN_OEM_LETTER_SCANS,
+    autocorrect_replacement,
+)
 from qwasda import (  # noqa: E402
     LANG_ENGLISH,
     LANG_UKRAINIAN,
@@ -94,6 +99,19 @@ def test_is_word_text_accepts_internal_apostrophe():
 def test_is_word_text_rejects_edge_apostrophes():
     assert is_word_text("'слово") is False
     assert is_word_text("слово'") is False
+
+
+def test_scan_apostrophe_maps_to_ukrainian_word_joiner():
+    assert scans_to_ukr([(0x29, False)]) == "'"
+    assert scans_to_eng([(0x29, False)]) == "`"
+    assert 0x29 in LETTER_SCANS
+
+
+def test_ukrainian_word_with_apostrophe_stays_one_scan_word():
+    apostrophe_word = scans("g") + [(0x29, False)] + scans("znm")
+
+    assert scans_to_ukr(apostrophe_word) == "п'ять"
+    assert manual_target(apostrophe_word, LANG_ENGLISH) == ("п'ять", LANG_UKRAINIAN)
 
 
 # ───────────────────────── Ручне перемикання ──────────────────────────────
@@ -184,7 +202,13 @@ def dicts(tmp_path, monkeypatch):
     monkeypatch.setattr(qwasda, "APP_DIR", str(tmp_path))
     monkeypatch.setattr(qwasda, "LEARNED_PATH", str(tmp_path / "learned.json"))
     monkeypatch.setattr(qwasda, "DICT_EN", frozenset({"hello", "the", "cat"}))
-    monkeypatch.setattr(qwasda, "DICT_UK", _index(["привіт", "кіт", "так"]))
+    monkeypatch.setattr(
+        qwasda,
+        "DICT_UK",
+        _index(
+            ["привіт", "хто", "їжа", "вже", "є", "був", "юнак", "ґанок", "п'ять", "кіт", "так"]
+        ),
+    )
     monkeypatch.setattr(qwasda, "dicts_loaded", True)
     monkeypatch.setattr(qwasda, "MIN_AUTOCORRECT_LEN", 2)
     monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 3)
@@ -208,6 +232,22 @@ def _autocorrect_target(scans, layout):
     )
 
 
+def _autocorrect_replacement(scans, layout):
+    """Helper to call deferred OEM-aware correction with test fixtures."""
+    from qwasda.dicts import DictionaryLoader
+    from qwasda.learning import LearningManager
+
+    dict_loader = DictionaryLoader(".")
+    dict_loader.dict_en = qwasda.DICT_EN
+    dict_loader.dict_uk = qwasda.DICT_UK
+    dict_loader.dicts_loaded = qwasda.dicts_loaded
+    learning = LearningManager(qwasda._get_config_manager())
+
+    return autocorrect_replacement(
+        scans, layout, dict_loader, learning, qwasda.MIN_AUTOCORRECT_LEN, qwasda.MIN_EN_TO_UK
+    )
+
+
 def test_autocorrect_uk_to_en(dicts):
     # На екрані «руддщ» (UK), але це «hello» в англ. читанні.
     conv, target = _autocorrect_target(scans("hello"), LANG_UKRAINIAN)
@@ -220,6 +260,52 @@ def test_autocorrect_en_to_uk(dicts):
     conv, target = _autocorrect_target(scans("ghbdsn"), LANG_ENGLISH)
     assert conv == "привіт"
     assert target == LANG_UKRAINIAN
+
+
+def test_autocorrect_en_to_uk_keeps_internal_apostrophe(dicts):
+    apostrophe_word = scans("g") + [(0x29, False)] + scans("znm")
+
+    assert _autocorrect_target(apostrophe_word, LANG_ENGLISH) == (
+        "п'ять",
+        LANG_UKRAINIAN,
+    )
+
+
+@pytest.mark.parametrize(
+    ("typed", "expected"),
+    [
+        ([(0x1A, False)] + scans("nj"), "хто"),
+        ([(0x1B, False), (0x27, False)] + scans("f"), "їжа"),
+        (scans("d") + [(0x27, False)] + scans("t"), "вже"),
+        ([(0x28, False)], "є"),
+        ([(0x33, False)] + scans("ed"), "був"),
+        ([(0x34, False)] + scans("yfr"), "юнак"),
+        ([(0x2B, False)] + scans("fyjr"), "ґанок"),
+        (scans("g") + [(0x29, False)] + scans("znm"), "п'ять"),
+    ],
+)
+def test_autocorrect_replacement_accepts_all_ukrainian_oem_letter_positions(
+    dicts, typed, expected
+):
+    assert _autocorrect_replacement(typed, LANG_ENGLISH) == (expected, LANG_UKRAINIAN)
+
+
+def test_autocorrect_replacement_preserves_shifted_oem_punctuation(dicts):
+    typed = scans("ghbdsn") + [(0x1A, True)]
+
+    assert _autocorrect_replacement(typed, LANG_ENGLISH) == ("привіт{", LANG_UKRAINIAN)
+
+
+def test_autocorrect_replacement_treats_unrecognized_oem_position_as_punctuation(dicts):
+    typed = scans("ghbdsn") + [(0x27, False)]
+
+    assert _autocorrect_replacement(typed, LANG_ENGLISH) == ("привіт;", LANG_UKRAINIAN)
+
+
+def test_ukrainian_oem_letter_positions_are_kept_in_word_scans():
+    assert UKRAINIAN_OEM_LETTER_SCANS == frozenset(
+        {0x29, 0x1A, 0x1B, 0x27, 0x28, 0x2B, 0x33, 0x34}
+    )
 
 
 def test_autocorrect_leaves_valid_en_word(dicts):

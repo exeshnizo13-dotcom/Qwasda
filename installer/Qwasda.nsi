@@ -9,7 +9,7 @@ RequestExecutionLevel user
 !include "WinVer.nsh"
 
 !ifndef APP_VERSION
-  !define APP_VERSION "1.4.0"
+  !define APP_VERSION "1.5.0"
 !endif
 !ifndef PAYLOAD
   !define PAYLOAD "..\artifacts\Qwasda-${APP_VERSION}-x64.exe"

@@ -4,9 +4,9 @@
 
 ## Встановлення Windows
 
-Запустіть `Qwasda-Setup-1.4.0-x64.exe`. Інсталятор працює для поточного користувача, не потребує Python і створює ярлик у Start Menu. Автозапуск Windows вимкнений за замовчуванням.
+Запустіть `Qwasda-Setup-1.5.0-x64.exe`. Інсталятор працює для поточного користувача, не потребує Python і створює ярлик у Start Menu. Автозапуск Windows вимкнений за замовчуванням.
 
-Для portable-режиму запустіть `Qwasda-1.4.0-x64.exe`; він не змінює інсталяцію та також не потребує Python.
+Для portable-режиму запустіть `Qwasda-1.5.0-x64.exe`; він не змінює інсталяцію та також не потребує Python.
 
 Під час оновлення зберігаються `config.json`, `learned.json`, власні словники й приватна статистика. Звичайне видалення не очищує AppData; повне очищення доступне окремим прапорцем uninstall.
 
@@ -47,7 +47,7 @@ mypy qwasda
 python release.py
 ```
 
-`release.py` створює `artifacts/Qwasda-1.4.0-x64.exe`, `artifacts/Qwasda-Setup-1.4.0-x64.exe` і `artifacts/SHA256SUMS.txt`.
+`release.py` створює `artifacts/Qwasda-1.5.0-x64.exe`, `artifacts/Qwasda-Setup-1.5.0-x64.exe`, `artifacts/SHA256SUMS.txt` і підписаний updater manifest.
 
 ## Дані користувача
 

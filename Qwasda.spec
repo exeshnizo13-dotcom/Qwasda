@@ -8,6 +8,7 @@ a = Analysis(
     datas=[
         ('data/words_en.txt.gz', 'data'),
         ('data/words_uk.txt.gz', 'data'),
+        ('build/update-public-keys.json', '.'),
     ],
     hiddenimports=['six', 'six.moves'],
     version='version_info.txt',

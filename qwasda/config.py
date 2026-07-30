@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, cast
 
 from .hotkeys import HotkeyBindings, default_hotkeys, parse_hotkeys, serialize_hotkeys
+from .updater import UpdateChannel
 
 
 def _get_qwasda_learned_sets() -> tuple[set[str], set[str], set[str], set[str]]:
@@ -41,6 +42,8 @@ class Config:
     double_tap_window: float = 0.4
     hotkeys: HotkeyBindings = field(default_factory=default_hotkeys)
     statistics_enabled: bool = False
+    update_checks_enabled: bool = False
+    update_channel: UpdateChannel = UpdateChannel.STABLE
     app_dir: str = ""
 
     def __post_init__(self) -> None:
@@ -128,6 +131,12 @@ class ConfigManager:
                 self._config.hotkeys = parse_hotkeys(data.get("hotkeys"))
                 if "statistics_enabled" in data and isinstance(data["statistics_enabled"], bool):
                     self._config.statistics_enabled = data["statistics_enabled"]
+                if "update_checks_enabled" in data and isinstance(
+                    data["update_checks_enabled"], bool
+                ):
+                    self._config.update_checks_enabled = data["update_checks_enabled"]
+                if data.get("update_channel") in {item.value for item in UpdateChannel}:
+                    self._config.update_channel = UpdateChannel(data["update_channel"])
         except (OSError, json.JSONDecodeError):
             pass  # Keep defaults
 
@@ -159,6 +168,7 @@ class ConfigManager:
             with open(tmp, "w", encoding="utf-8") as f:
                 data = asdict(self._config)
                 data["hotkeys"] = serialize_hotkeys(self._config.hotkeys)
+                data["update_channel"] = self._config.update_channel.value
                 json.dump(data, f, ensure_ascii=False, indent=2)
             os.replace(tmp, self.config_path)
         except OSError:

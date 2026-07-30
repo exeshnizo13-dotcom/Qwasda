@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from .settings_ui import SettingsWindow
     from .single_instance import ShutdownSignal, SingleInstance
     from .tray import TrayIcon
+    from .updater import UpdateSnapshot
     from .win32 import get_foreground_layout
 
 from .admin import get_integrity_level, is_admin
@@ -75,6 +76,7 @@ from .startup import migrate_legacy_startup
 from .startup import set_enabled as set_startup_enabled
 from .statistics import StatisticsManager
 from .tray import TrayIcon
+from .updater import UpdateChannel, UpdateManager, UpdateSnapshot
 from .win32 import (
     MODIFIER_VKS,
     NAV_CLEAR_VKS,
@@ -109,6 +111,7 @@ class QwasdaEngine:
         self.single_instance = SingleInstance()
         self.shutdown_signal = ShutdownSignal()
         self._shutdown_thread: threading.Thread | None = None
+        self._message_thread_id: int | None = None
         self.config_manager: ConfigManager | None = None
 
         # State
@@ -131,6 +134,7 @@ class QwasdaEngine:
         # Tray
         self.tray: TrayIcon | None = None
         self.settings: SettingsWindow | None = None
+        self.updater: UpdateManager | None = None
 
         # Layout cache
         self._cached_layout = 0x0409  # Default EN
@@ -244,6 +248,12 @@ class QwasdaEngine:
         )
         self.statistics.load()
         self.statistics.start()
+        self.updater = UpdateManager(
+            self.config.app_dir,
+            enabled=self.config.update_checks_enabled,
+            channel=self.config.update_channel,
+            callback=self._on_update_snapshot,
+        )
         try:
             self.hotkeys.apply(self.config.hotkeys)
         except HotkeyError:
@@ -297,7 +307,12 @@ class QwasdaEngine:
             )
             return 1
 
-        self.mouse_hook = MouseHook(self.phrase_buffer, self.worker)
+        self.mouse_hook = MouseHook(
+            self.phrase_buffer,
+            self.worker,
+            self.kb_hook,
+            self.caret_guard,
+        )
         self.mouse_hook.install(hinst)
 
         self.settings = SettingsWindow(
@@ -308,6 +323,10 @@ class QwasdaEngine:
             statistics=self.statistics,
             on_statistics_enabled=self._apply_statistics_enabled,
             on_statistics_cleared=self._clear_statistics,
+            updater=self.updater,
+            on_updates_enabled=self._apply_updates_enabled,
+            on_update_channel=self._apply_update_channel,
+            on_update_apply=self._apply_update,
         )
 
         # Start tray
@@ -324,8 +343,11 @@ class QwasdaEngine:
             on_exit=self._tray_callbacks["exit"],
             version=self.version,
             statistics=self.statistics,
+            on_check_updates=self._check_updates,
         )
         self.tray.run()
+        if self.updater and self.config.update_checks_enabled:
+            self.updater.check(automatic=True)
 
         # Initialize health monitoring once, after all components are ready.
         self._health_monitor = initialize_health_monitoring(
@@ -420,6 +442,7 @@ class QwasdaEngine:
             ),
             ("tray", lambda: self.tray.stop() if self.tray else None),
             ("settings", self._stop_settings),
+            ("updater", lambda: self.updater.stop() if self.updater else None),
             ("hotkeys", self._close_hotkeys),
             ("mouse hook", lambda: self.mouse_hook.uninstall() if self.mouse_hook else None),
             ("keyboard hook", lambda: self.kb_hook.uninstall() if self.kb_hook else None),
@@ -440,15 +463,39 @@ class QwasdaEngine:
 
     def _wait_for_shutdown(self) -> None:
         if self.shutdown_signal.wait():
-            self._running = False
-            user32.PostThreadMessageW(self._message_thread_id, WM_QUIT, 0, 0)
+            self._post_quit()
+
+    def _post_quit(self) -> None:
+        """Stop the main Win32 message loop from any callback thread."""
+        self._running = False
+        thread_id = self._message_thread_id
+        if thread_id is not None:
+            user32.PostThreadMessageW(thread_id, WM_QUIT, 0, 0)
 
     def _close_shutdown_signal(self) -> None:
         self.shutdown_signal.close()
 
+    def _check_updates(self) -> None:
+        if self.updater:
+            self.updater.check()
+        self._open_settings("updates")
+
+    def _on_update_snapshot(self, snapshot: UpdateSnapshot) -> None:
+        if (
+            snapshot.status == "available"
+            and snapshot.available
+            and self.tray
+            and self.updater
+            and self.updater.client.consume_notification(snapshot.available.version)
+        ):
+            self.tray.notify(
+                f"Доступне оновлення Qwasda {snapshot.available.version}",
+                "Qwasda",
+            )
+            self.tray.update_menu()
+
     def _signal_handler(self, signum: int, frame: object) -> None:
-        self._running = False
-        user32.PostThreadMessageW(kernel32.GetCurrentThreadId(), WM_QUIT, 0, 0)
+        self._post_quit()
 
     # =========================================================================
     # Layout Management
@@ -715,6 +762,32 @@ class QwasdaEngine:
             self.tray.update_menu()
         return None
 
+    def _apply_updates_enabled(self, enabled: bool) -> str | None:
+        if self.updater:
+            self.updater.enabled = enabled
+        self.config.update_checks_enabled = enabled
+        if self.config_manager:
+            self.config_manager.save_config()
+        return None
+
+    def _apply_update_channel(self, channel: UpdateChannel) -> str | None:
+        if self.updater:
+            self.updater.channel = channel
+        self.config.update_channel = channel
+        if self.config_manager:
+            self.config_manager.save_config()
+        return None
+
+    def _apply_update(self) -> str | None:
+        if self.updater is None:
+            return "Updater не ініціалізований"
+        try:
+            message = self.updater.start_apply(Path(sys.executable))
+        except Exception as exc:
+            return str(exc)
+        self._request_exit()
+        return message
+
     @staticmethod
     def _startup_enabled() -> bool:
         from .startup import is_enabled
@@ -767,12 +840,7 @@ class QwasdaEngine:
             self.tray.update_menu()
 
     def _request_exit(self) -> None:
-        self._running = False
-        if self.kb_hook:
-            self.kb_hook.uninstall()
-        if self.worker:
-            self.worker.shutdown()
-        user32.PostThreadMessageW(kernel32.GetCurrentThreadId(), WM_QUIT, 0, 0)
+        self._post_quit()
         if self.tray:
             self.tray.stop()
 
