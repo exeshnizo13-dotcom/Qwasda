@@ -139,6 +139,7 @@ class Watchdog:
         self._running = False
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._stop_event = threading.Event()
         self._triggered = False
 
     def start(self) -> None:
@@ -147,6 +148,7 @@ class Watchdog:
             if self._running:
                 return
             self._running = True
+            self._stop_event.clear()
             self._last_heartbeat = time.time()
             self._triggered = False
             self._thread = threading.Thread(target=self._run, daemon=True, name=self.name)
@@ -156,6 +158,7 @@ class Watchdog:
         """Stop the watchdog."""
         with self._lock:
             self._running = False
+        self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=5.0)
 
@@ -182,7 +185,7 @@ class Watchdog:
                 with contextlib.suppress(Exception):
                     callback()
 
-            time.sleep(min(1.0, self.timeout / 10))
+            self._stop_event.wait(min(1.0, self.timeout / 10))
 
     def is_alive(self) -> bool:
         """Check if watchdog thread is running."""
@@ -225,6 +228,7 @@ class HealthMonitor:
         self._check_thread: threading.Thread | None = None
         self._metrics_thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._stop_event = threading.Event()
 
         # Process for metrics
         self._process = psutil.Process(os.getpid())
@@ -245,6 +249,7 @@ class HealthMonitor:
         if self._running:
             return
         self._running = True
+        self._stop_event.clear()
         self.watchdog.start()
 
         self._check_thread = threading.Thread(
@@ -262,6 +267,7 @@ class HealthMonitor:
     def stop(self) -> None:
         """Stop monitoring."""
         self._running = False
+        self._stop_event.set()
         self.watchdog.stop()
 
         if self._check_thread:
@@ -324,21 +330,21 @@ class HealthMonitor:
 
     def _check_loop(self) -> None:
         """Background loop for health checks."""
-        while self._running:
+        while self._running and not self._stop_event.is_set():
             try:
                 self.run_checks()
             except Exception as e:
                 self.logger.error(f"Health check error: {e}")
-            time.sleep(self.check_interval)
+            self._stop_event.wait(self.check_interval)
 
     def _metrics_loop(self) -> None:
         """Background loop for metrics collection."""
-        while self._running:
+        while self._running and not self._stop_event.is_set():
             try:
                 self._collect_metrics()
             except Exception as e:
                 self.logger.error(f"Metrics collection error: {e}")
-            time.sleep(self.metrics_interval)
+            self._stop_event.wait(self.metrics_interval)
 
     def _collect_metrics(self) -> None:
         """Collect system metrics."""

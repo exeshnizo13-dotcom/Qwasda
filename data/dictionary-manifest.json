@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "dictionaries": {
+    "words_en.txt.gz": {
+      "sha256": "47257c3940e0363f3b09e976818e3eb4e93f467f00441e5b27e9c8665f311470",
+      "words": 370104
+    },
+    "words_uk.txt.gz": {
+      "sha256": "9ea6d864faf5c8fba74132e4d51d4f5d45f69cad5aac01a1be62fd233f9b71df",
+      "words": 3817543
+    }
+  }
+}

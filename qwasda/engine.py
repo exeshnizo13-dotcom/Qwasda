@@ -267,20 +267,6 @@ class QwasdaEngine:
         # Apply config to engine state
         self._enabled.set() if self.config.enabled else self._enabled.clear()
 
-        # Load dictionaries before installing hooks so the app never sits in a
-        # half-initialized state where auto-correct is disabled indefinitely.
-        dict_start = time.perf_counter()
-        self.dict_loader.load()
-        logger.info(
-            "Dictionaries loaded during startup",
-            extra={
-                "loaded": self.dict_loader.dicts_loaded,
-                "en_words": len(self.dict_loader.dict_en),
-                "uk_words": len(self.dict_loader.dict_uk),
-                "seconds": round(time.perf_counter() - dict_start, 3),
-            },
-        )
-
         # Initialize worker
         self.worker = CorrectionWorker(
             dict_loader=self.dict_loader,
@@ -346,6 +332,9 @@ class QwasdaEngine:
             on_check_updates=self._check_updates,
         )
         self.tray.run()
+        # A cache hit is cheap; a cache miss is built in a low-priority
+        # background thread while the tray and hooks remain responsive.
+        self.dict_loader.load_cached_or_async()
         if self.updater and self.config.update_checks_enabled:
             self.updater.check(automatic=True)
 
@@ -447,6 +436,10 @@ class QwasdaEngine:
             ("mouse hook", lambda: self.mouse_hook.uninstall() if self.mouse_hook else None),
             ("keyboard hook", lambda: self.kb_hook.uninstall() if self.kb_hook else None),
             ("worker", lambda: self.worker.shutdown() if self.worker else None),
+            (
+                "dictionary cache",
+                lambda: self.dict_loader.close() if getattr(self, "dict_loader", None) else None,
+            ),
             ("single instance", self.single_instance.release),
             ("shutdown signal", self._close_shutdown_signal),
             ("statistics", self._stop_statistics),
@@ -454,8 +447,13 @@ class QwasdaEngine:
             ("crash reporting", shutdown_crash_reporting),
         )
         for name, cleanup in cleanup_steps:
+            started = time.perf_counter()
             try:
                 cleanup()
+                logging.getLogger("qwasda.engine").info(
+                    "Cleanup step finished",
+                    extra={"component": name, "seconds": round(time.perf_counter() - started, 3)},
+                )
             except Exception:
                 logging.getLogger("qwasda.engine").exception(
                     "Cleanup failed", extra={"component": name}

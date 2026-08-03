@@ -20,6 +20,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -118,6 +119,7 @@ class UpdateRelease:
     asset_sha256: str
     manifest: bytes
     signature: bytes
+    package_type: str = "exe"
     release_url: str = ""
 
 
@@ -158,7 +160,7 @@ class ManifestVerifier:
             signature = json.loads(signature_bytes.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise UpdateError("Пошкоджений update manifest або підпис") from exc
-        if not isinstance(manifest, dict) or manifest.get("schema") != 1:
+        if not isinstance(manifest, dict) or manifest.get("schema") not in (1, 2):
             raise UpdateError("Непідтримувана схема update manifest")
         key_id = manifest.get("signing_key_id")
         if not isinstance(key_id, str) or signature.get("key_id") != key_id:
@@ -212,7 +214,9 @@ def release_from_manifest(
     version = payload.get("version")
     channel = payload.get("channel")
     assets = payload.get("assets")
-    asset = assets.get("windows-x64-portable") if isinstance(assets, dict) else None
+    schema = payload.get("schema")
+    asset_key = "windows-x64-portable" if schema == 1 else "windows-x64-portable-zip"
+    asset = assets.get(asset_key) if isinstance(assets, dict) else None
     if not isinstance(version, str) or not isinstance(channel, str):
         raise UpdateError("Manifest не містить версії або каналу")
     try:
@@ -226,7 +230,10 @@ def release_from_manifest(
     url = asset.get("url", "")
     if (
         not isinstance(name, str)
-        or not re.fullmatch(r"Qwasda-[0-9A-Za-z.+-]+-x64\.exe", name)
+        or not re.fullmatch(
+            r"Qwasda-[0-9A-Za-z.+-]+-x64\.(exe|zip)" if schema == 2 else r"Qwasda-[0-9A-Za-z.+-]+-x64\.exe",
+            name,
+        )
         or not isinstance(size, int)
         or size <= 0
         or size > MAX_DOWNLOAD_BYTES
@@ -246,6 +253,7 @@ def release_from_manifest(
         asset_sha256=digest,
         manifest=manifest_bytes,
         signature=signature,
+        package_type="zip" if schema == 2 else "exe",
         release_url=release_url,
     )
 
@@ -345,11 +353,8 @@ class ReleaseClient:
         signature = self._read_asset(signature_asset)
         manifest = ManifestVerifier().verify(manifest_bytes, signature)
         manifest_assets = manifest.get("assets")
-        portable_data = (
-            manifest_assets.get("windows-x64-portable")
-            if isinstance(manifest_assets, dict)
-            else None
-        )
+        asset_key = "windows-x64-portable-zip" if manifest.get("schema") == 2 else "windows-x64-portable"
+        portable_data = manifest_assets.get(asset_key) if isinstance(manifest_assets, dict) else None
         portable_name = portable_data.get("name") if isinstance(portable_data, dict) else None
         portable = by_name.get(portable_name)
         if not isinstance(portable, dict):
@@ -361,7 +366,7 @@ class ReleaseClient:
             portable_data = dict(portable_data)
             portable_data["url"] = asset_url
             manifest_assets = dict(manifest_assets)
-            manifest_assets["windows-x64-portable"] = portable_data
+            manifest_assets[asset_key] = portable_data
             manifest = dict(manifest)
             manifest["assets"] = manifest_assets
         result = release_from_manifest(
@@ -461,6 +466,78 @@ def _replace_file(source: Path, target: Path, backup: Path | None = None) -> Non
     os.replace(source, target)
 
 
+def _safe_extract_zip(archive: Path, staging: Path) -> Path:
+    """Extract a package without allowing traversal or links."""
+    staging.mkdir(parents=True, exist_ok=False)
+    extracted = 0
+    with zipfile.ZipFile(archive) as bundle:
+        for member in bundle.infolist():
+            name = member.filename.replace("\\", "/")
+            relative = Path(name)
+            if not name or relative.is_absolute() or ".." in relative.parts:
+                raise UpdateError("Небезпечний шлях у ZIP оновлення")
+            if member.external_attr >> 16 & 0o170000 == 0o120000:
+                raise UpdateError("ZIP оновлення містить symlink")
+            destination = (staging / relative).resolve()
+            if staging.resolve() not in destination.parents and destination != staging.resolve():
+                raise UpdateError("Небезпечний шлях у ZIP оновлення")
+            if member.is_dir():
+                destination.mkdir(parents=True, exist_ok=True)
+            else:
+                extracted += member.file_size
+                if extracted > MAX_DOWNLOAD_BYTES * 4:
+                    raise UpdateError("Розпакований пакет оновлення завеликий")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with bundle.open(member) as source, destination.open("wb") as target:
+                    shutil.copyfileobj(source, target, length=1024 * 1024)
+    root = staging / "Qwasda"
+    return root if (root / "Qwasda.exe").is_file() else staging
+
+
+def _apply_zip_package(ready: Path, target: Path, expected: str) -> None:
+    staging = ready.with_name(f"{ready.stem}.staging")
+    root = _safe_extract_zip(ready, staging)
+    manifest_path = root / "package-manifest.json"
+    if not manifest_path.is_file() or not (root / "Qwasda.exe").is_file():
+        raise UpdateError("ZIP оновлення не містить package manifest або Qwasda.exe")
+    package = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if package.get("version") != expected or not isinstance(package.get("files"), dict):
+        raise UpdateError("Невідповідний package manifest")
+    for relative, digest in package["files"].items():
+        path = (root / str(relative)).resolve()
+        if root.resolve() not in path.parents or not path.is_file():
+            raise UpdateError("Некоректний файл у package manifest")
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise UpdateError("SHA-256 файла оновлення не збігається")
+    backup_root = ready.with_name(f"{ready.stem}.backup")
+    try:
+        for relative in package["files"]:
+            source = root / str(relative)
+            destination = target.parent / str(relative)
+            backup = backup_root / str(relative)
+            if destination.exists():
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(destination), str(backup))
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        result = subprocess.run([str(target), "--version"], timeout=30, capture_output=True, text=True)
+        if result.returncode != 0 or result.stdout.strip() != expected:
+            raise UpdateError("Нова версія не пройшла перевірку")
+    except Exception:
+        for relative in package["files"]:
+            destination = target.parent / str(relative)
+            backup = backup_root / str(relative)
+            if destination.exists():
+                destination.unlink()
+            if backup.exists():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(backup), str(destination))
+        raise
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(backup_root, ignore_errors=True)
+
+
 def apply_update(journal_path: Path, timeout: float = 30.0) -> int:
     """Apply a preflighted update from a journal; intended for the helper."""
     try:
@@ -475,15 +552,16 @@ def apply_update(journal_path: Path, timeout: float = 30.0) -> int:
             raise UpdateError("Файл оновлення або target відсутній")
         journal["state"] = "applying"
         _write_json(journal_path, journal)
-        _replace_file(ready, target, backup)
-        result = subprocess.run(
-            [str(target), "--version"], timeout=timeout, capture_output=True, text=True
-        )
-        if result.returncode != 0 or result.stdout.strip() != expected:
-            raise UpdateError("Нова версія не пройшла перевірку")
-        smoke = subprocess.run([str(target), "--smoke-test"], timeout=timeout)
-        if smoke.returncode != 0:
-            raise UpdateError("Smoke-test нової версії завершився помилкою")
+        if str(journal.get("package_type", "exe")) == "zip":
+            _apply_zip_package(ready, target, expected)
+        else:
+            _replace_file(ready, target, backup)
+            result = subprocess.run([str(target), "--version"], timeout=timeout, capture_output=True, text=True)
+            if result.returncode != 0 or result.stdout.strip() != expected:
+                raise UpdateError("Нова версія не пройшла перевірку")
+            smoke = subprocess.run([str(target), "--smoke-test"], timeout=timeout)
+            if smoke.returncode != 0:
+                raise UpdateError("Smoke-test нової версії завершився помилкою")
         journal["state"] = "applied"
         _write_json(journal_path, journal)
         backup.unlink(missing_ok=True)
@@ -607,14 +685,23 @@ class UpdateManager:
             raise UpdateError("Оновлення ще не завантажене")
         if not getattr(sys, "frozen", False):
             raise UpdateError("Самозаміна доступна лише у packaged EXE")
-        version_result = subprocess.run(
-            [str(ready), "--version"], timeout=30, capture_output=True, text=True
-        )
-        if version_result.returncode != 0 or version_result.stdout.strip() != release.version:
-            raise UpdateError("Завантажена версія не пройшла preflight")
-        smoke_result = subprocess.run([str(ready), "--smoke-test"], timeout=30)
-        if smoke_result.returncode != 0:
-            raise UpdateError("Завантажений EXE не пройшов smoke-test")
+        if release.package_type == "zip":
+            try:
+                with zipfile.ZipFile(ready) as bundle:
+                    names = set(bundle.namelist())
+                    manifest_name = "Qwasda/package-manifest.json" if "Qwasda/package-manifest.json" in names else "package-manifest.json"
+                    package = json.loads(bundle.read(manifest_name).decode("utf-8"))
+                if package.get("version") != release.version:
+                    raise UpdateError("ZIP версія не пройшла preflight")
+            except (OSError, KeyError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
+                raise UpdateError("Завантажений ZIP не пройшов preflight") from exc
+        else:
+            version_result = subprocess.run([str(ready), "--version"], timeout=30, capture_output=True, text=True)
+            if version_result.returncode != 0 or version_result.stdout.strip() != release.version:
+                raise UpdateError("Завантажена версія не пройшла preflight")
+            smoke_result = subprocess.run([str(ready), "--smoke-test"], timeout=30)
+            if smoke_result.returncode != 0:
+                raise UpdateError("Завантажений EXE не пройшов smoke-test")
         backup = ready.with_suffix(".backup.exe")
         journal = ready.with_suffix(".json")
         _write_json(
@@ -625,9 +712,20 @@ class UpdateManager:
                 "target": str(target),
                 "backup": str(backup),
                 "version": release.version,
+                "package_type": release.package_type,
             },
         )
-        helper = ready.with_name("Qwasda-Updater.exe")
-        shutil.copy2(sys.executable, helper)
+        if release.package_type == "zip" and getattr(sys, "frozen", False):
+            # A one-dir executable needs its adjacent _internal directory.
+            # Copy the current runnable bundle outside the install directory
+            # so the helper can replace the live package safely.
+            helper_root = ready.with_name("Qwasda-Updater")
+            if helper_root.exists():
+                shutil.rmtree(helper_root, ignore_errors=True)
+            shutil.copytree(Path(sys.executable).parent, helper_root)
+            helper = helper_root / Path(sys.executable).name
+        else:
+            helper = ready.with_name("Qwasda-Updater.exe")
+            shutil.copy2(sys.executable, helper)
         subprocess.Popen([str(helper), "--apply-update", str(journal)])
         return "Оновлення запущено; Qwasda буде перезапущено після перевірки."

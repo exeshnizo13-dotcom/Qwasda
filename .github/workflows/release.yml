@@ -41,14 +41,14 @@ jobs:
           $projectVersion = (Get-Content qwasda/version.py | Select-String '__version__').ToString() -replace '.*"([0-9.]+)".*', '$1'
           if ($tagVersion -ne $projectVersion) { throw "Tag $tagVersion does not match project version $projectVersion" }
 
-      - name: Build portable EXE and NSIS installer
+      - name: Build portable ZIP and NSIS installer
         run: |
           python release.py
 
       - name: Verify packaged CLI
         run: |
-          ./artifacts/Qwasda-1.5.0-x64.exe --version
-          ./artifacts/Qwasda-1.5.0-x64.exe --smoke-test
+          ./dist/Qwasda/Qwasda.exe --version
+          ./dist/Qwasda/Qwasda.exe --smoke-test
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -61,14 +61,14 @@ jobs:
             Автоматичне визначення та перемикання розкладки клавіатури між українською та англійською.
 
             ### Завантаження
-            - `Qwasda-1.5.0-x64.exe` — portable-виконавчий файл
+            - `Qwasda-1.5.0-x64.zip` — portable-пакет
             - `Qwasda-Setup-1.5.0-x64.exe` — per-user інсталятор
             - Контрольні суми: `SHA256SUMS.txt`
 
             ### Встановлення
             1. Завантажте та запустіть `Qwasda-Setup-1.5.0-x64.exe`
             2. За потреби виберіть автозапуск Windows
-            3. Для portable-режиму запустіть `Qwasda-1.5.0-x64.exe`
+            3. Для portable-режиму розпакуйте ZIP та запустіть `Qwasda.exe`
 
             ### Перевірка цілісності
             ```powershell
@@ -79,7 +79,7 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            artifacts/Qwasda-1.5.0-x64.exe
+            artifacts/Qwasda-1.5.0-x64.zip
             artifacts/Qwasda-Setup-1.5.0-x64.exe
             artifacts/SHA256SUMS.txt
             artifacts/update-manifest.json

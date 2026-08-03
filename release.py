@@ -72,18 +72,28 @@ def main() -> int:
         json.dumps(key_payload, sort_keys=True), encoding="utf-8"
     )
     run(sys.executable, "-m", "PyInstaller", "Qwasda.spec", "--clean", "--noconfirm")
-    portable = ARTIFACTS / f"Qwasda-{version}-x64.exe"
-    shutil.copy2(ROOT / "dist" / "Qwasda.exe", portable)
-    version_result = run(str(portable), "--version", capture_output=True)
+    dist_dir = ROOT / "dist" / "Qwasda"
+    if not (dist_dir / "Qwasda.exe").is_file():
+        raise SystemExit("PyInstaller one-dir output is missing Qwasda.exe")
+    package_manifest: dict[str, object] = {"schema": 1, "version": version, "files": {}}
+    files: dict[str, str] = {}
+    for path in sorted(dist_dir.rglob("*")):
+        if path.is_file() and path.name != "package-manifest.json":
+            files[str(path.relative_to(dist_dir)).replace(os.sep, "/")] = hashlib.sha256(path.read_bytes()).hexdigest()
+    package_manifest["files"] = files
+    (dist_dir / "package-manifest.json").write_bytes(canonical_json(package_manifest))
+    portable = ARTIFACTS / f"Qwasda-{version}-x64.zip"
+    shutil.make_archive(str(portable.with_suffix("")), "zip", root_dir=ROOT / "dist", base_dir="Qwasda")
+    version_result = run(str(dist_dir / "Qwasda.exe"), "--version", capture_output=True)
     if version_result.stdout.strip() != version:
         raise SystemExit(f"Packaged version mismatch: {version_result.stdout!r}")
-    run(str(portable), "--smoke-test", capture_output=True)
+    run(str(dist_dir / "Qwasda.exe"), "--smoke-test", capture_output=True)
 
     makensis = os.environ.get("MAKENSIS", "makensis")
     run(
         makensis,
         f"/DAPP_VERSION={version}",
-        f"/DPAYLOAD={portable}",
+        f"/DPAYLOAD_DIR={dist_dir}",
         f"/DOUT_DIR={ARTIFACTS}",
         str(ROOT / "installer" / "Qwasda.nsi"),
     )
@@ -92,12 +102,12 @@ def main() -> int:
     password = os.environ.get("QWASDA_SIGNTOOL_PASSWORD")
     if cert and password:
         signtool = os.environ.get("SIGNTOOL", "signtool")
-        for artifact in (portable, ARTIFACTS / f"Qwasda-Setup-{version}-x64.exe"):
+        for artifact in (ARTIFACTS / f"Qwasda-Setup-{version}-x64.exe",):
             run(signtool, "sign", "/fd", "SHA256", "/f", cert, "/p", password, str(artifact))
             run(signtool, "verify", "/pa", str(artifact))
 
     lines = []
-    for artifact in sorted(ARTIFACTS.glob("Qwasda-*.exe")):
+    for artifact in sorted(ARTIFACTS.glob("Qwasda-*.zip")) + sorted(ARTIFACTS.glob("Qwasda-*.exe")):
         digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
         lines.append(f"{digest}  {artifact.name}")
     (ARTIFACTS / "SHA256SUMS.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -115,7 +125,7 @@ def main() -> int:
         except (ValueError, TypeError) as exc:
             raise SystemExit("QWASDA_UPDATE_SIGNING_KEY must be base64 Ed25519 seed") from exc
         manifest = {
-            "schema": 1,
+            "schema": 2,
             "version": version,
             "channel": "beta" if "-" in version else "stable",
             "published_at": os.environ.get("QWASDA_RELEASE_DATE", ""),
@@ -123,7 +133,7 @@ def main() -> int:
             "signing_key_id": key_id,
             "release_notes": "Безпечні opt-in автоматичні оновлення Qwasda.",
             "assets": {
-                "windows-x64-portable": {
+                "windows-x64-portable-zip": {
                     "name": portable.name,
                     "size": portable.stat().st_size,
                     "sha256": hashlib.sha256(portable.read_bytes()).hexdigest(),
@@ -133,7 +143,7 @@ def main() -> int:
         manifest_bytes = canonical_json(manifest)
         signature = private_key.sign(manifest_bytes)
         signature_payload = {
-            "schema": 1,
+            "schema": 2,
             "key_id": key_id,
             "signature": base64.b64encode(signature).decode("ascii"),
         }

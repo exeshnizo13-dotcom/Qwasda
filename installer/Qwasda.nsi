@@ -11,8 +11,8 @@ RequestExecutionLevel user
 !ifndef APP_VERSION
   !define APP_VERSION "1.5.0"
 !endif
-!ifndef PAYLOAD
-  !define PAYLOAD "..\artifacts\Qwasda-${APP_VERSION}-x64.exe"
+!ifndef PAYLOAD_DIR
+  !define PAYLOAD_DIR "..\dist\Qwasda"
 !endif
 !ifndef OUT_DIR
   !define OUT_DIR "..\artifacts"
@@ -69,7 +69,7 @@ FunctionEnd
 Section "Qwasda" SEC_CORE
   SectionIn RO
   SetOutPath "$INSTDIR"
-  File /oname=Qwasda.exe "${PAYLOAD}"
+  File /r "${PAYLOAD_DIR}\*"
 
   CreateDirectory "$SMPROGRAMS\Qwasda"
   CreateShortCut "$SMPROGRAMS\Qwasda\Qwasda.lnk" "$INSTDIR\Qwasda.exe"
@@ -150,9 +150,8 @@ Section "Uninstall"
 
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Qwasda"
   DeleteRegKey HKCU "Software\Qwasda"
-  Delete "$INSTDIR\Qwasda.exe"
   Delete "$INSTDIR\Uninstall.exe"
-  RMDir "$INSTDIR"
+  RMDir /r "$INSTDIR"
 
   ${If} $PurgeData == ${BST_CHECKED}
     RMDir /r "$APPDATA\Qwasda"

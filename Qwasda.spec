@@ -8,6 +8,7 @@ a = Analysis(
     datas=[
         ('data/words_en.txt.gz', 'data'),
         ('data/words_uk.txt.gz', 'data'),
+        ('data/dictionary-manifest.json', 'data'),
         ('build/update-public-keys.json', '.'),
     ],
     hiddenimports=['six', 'six.moves'],
@@ -25,8 +26,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
+    [],
+    [],
     [],
     name='Qwasda',
     debug=False,
@@ -41,4 +42,14 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='Qwasda',
 )
