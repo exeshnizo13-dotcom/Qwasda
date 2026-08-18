@@ -206,12 +206,27 @@ def dicts(tmp_path, monkeypatch):
         qwasda,
         "DICT_UK",
         _index(
-            ["привіт", "хто", "їжа", "вже", "є", "був", "юнак", "ґанок", "п'ять", "кіт", "так"]
+            [
+                "привіт",
+                "хто",
+                "їжа",
+                "вже",
+                "є",
+                "був",
+                "юнак",
+                "ґанок",
+                "п'ять",
+                "кіт",
+                "так",
+                "не",
+                "це",
+                "здається",
+            ]
         ),
     )
     monkeypatch.setattr(qwasda, "dicts_loaded", True)
     monkeypatch.setattr(qwasda, "MIN_AUTOCORRECT_LEN", 2)
-    monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 3)
+    monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 2)
 
 
 def _autocorrect_target(scans, layout):
@@ -260,6 +275,24 @@ def test_autocorrect_en_to_uk(dicts):
     conv, target = _autocorrect_target(scans("ghbdsn"), LANG_ENGLISH)
     assert conv == "привіт"
     assert target == LANG_UKRAINIAN
+
+
+def test_autocorrect_en_to_uk_accepts_two_letter_dictionary_word(dicts):
+    assert _autocorrect_target(scans("yt"), LANG_ENGLISH) == ("не", LANG_UKRAINIAN)
+    assert _autocorrect_target(scans("wt"), LANG_ENGLISH) == ("це", LANG_UKRAINIAN)
+
+
+def test_autocorrect_en_to_uk_accepts_word_with_oem_letter_position(dicts):
+    typed = scans("plf") + [(0x28, False)] + scans("nmcz")
+
+    assert _autocorrect_replacement(typed, LANG_ENGLISH) == (
+        "здається",
+        LANG_UKRAINIAN,
+    )
+
+
+def test_autocorrect_en_to_uk_leaves_unknown_two_letter_fragment(dicts):
+    assert _autocorrect_target(scans("qx"), LANG_ENGLISH) == (None, None)
 
 
 def test_autocorrect_en_to_uk_keeps_internal_apostrophe(dicts):
@@ -327,8 +360,8 @@ def test_autocorrect_en_to_uk_threshold(dicts, monkeypatch):
     # вищий за довжину слова — корекції бути не повинно.
     monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 7)
     assert _autocorrect_target(scans("ghbdsn"), LANG_ENGLISH) == (None, None)
-    # А зі стандартним порогом 3 — виправляється.
-    monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 3)
+    # А зі стандартним порогом 2 — виправляється.
+    monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 2)
     assert _autocorrect_target(scans("ghbdsn"), LANG_ENGLISH) == ("привіт", LANG_UKRAINIAN)
 
 
@@ -456,7 +489,7 @@ def test_config_round_trip(cfg_path, monkeypatch):
     # повертаємо «дефолти», тоді читаємо з файлу
     monkeypatch.setattr(qwasda, "enabled", True)
     monkeypatch.setattr(qwasda, "auto_correct_enabled", True)
-    monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 3)
+    monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 2)
     qwasda.load_config()
     assert qwasda.enabled is False
     assert qwasda.auto_correct_enabled is False
@@ -482,7 +515,21 @@ def test_load_config_rejects_bad_types(cfg_path, monkeypatch):
     monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 3)
     qwasda.load_config()
     assert qwasda.enabled is True  # рядок замість bool — проігноровано
-    assert qwasda.MIN_EN_TO_UK == 3  # від'ємне число — проігноровано
+    assert qwasda.MIN_EN_TO_UK == 2  # від'ємне число — проігноровано
+
+
+def test_load_config_migrates_old_default_threshold(cfg_path, monkeypatch):
+    cfg_path.write_text('{"min_en_to_uk": 3}', encoding="utf-8")
+    monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 5)
+    qwasda.load_config()
+    assert qwasda.MIN_EN_TO_UK == 2
+
+
+def test_load_config_preserves_custom_threshold(cfg_path, monkeypatch):
+    cfg_path.write_text('{"min_en_to_uk": 4}', encoding="utf-8")
+    monkeypatch.setattr(qwasda, "MIN_EN_TO_UK", 2)
+    qwasda.load_config()
+    assert qwasda.MIN_EN_TO_UK == 4
 
 
 # ───────────────────────── Перемикання цілої фрази ────────────────────────

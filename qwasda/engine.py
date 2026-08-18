@@ -575,11 +575,8 @@ class QwasdaEngine:
 
         # Word break (Space, Enter, Tab)
         if vk in WORD_BREAK_VKS:
-            if (
-                self.config.auto_correct_enabled
-                and self.typed_scans
-                and not self.caret_guard.on_word_break()
-            ):
+            suppressed = self.caret_guard.on_word_break()
+            if self.config.auto_correct_enabled and not suppressed:
                 scans = list(self.typed_scans)
                 layout = self.get_layout()
                 self.worker.enqueue(
@@ -592,8 +589,6 @@ class QwasdaEngine:
                         is_manual=False,
                     )
                 )
-            else:
-                self.caret_guard.on_word_break()
 
             self.phrase_buffer.add_sep(vk)
             self.typed_scans.clear()

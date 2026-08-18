@@ -152,7 +152,7 @@ enabled = True
 auto_correct_enabled = True
 learning_enabled = True
 MIN_AUTOCORRECT_LEN = 2
-MIN_EN_TO_UK = 3
+MIN_EN_TO_UK = 2
 DOUBLE_TAP_WINDOW = 0.4
 
 # App directory paths

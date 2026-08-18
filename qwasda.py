@@ -193,7 +193,7 @@ OEM_PUNCT_VKS = frozenset(
 # Перевизначаються з config.json (див. load_config) і доступні як глобальні
 # змінні, бо налаштовуються користувачем у рантаймі.
 MIN_AUTOCORRECT_LEN = 2  # не виправляти надто короткі слова (крім однолітерних зі списку)
-MIN_EN_TO_UK = 3  # напрямок EN→UK суворіший: укр. словник величезний (3.8M),
+MIN_EN_TO_UK = 2  # напрямок EN→UK допускає короткі словникові слова,
 # тож короткі латинські токени легко випадково «стають» укр.
 DOUBLE_TAP_WINDOW = 0.4  # макс. пауза (с) між двома Ctrl, щоб вважати їх «подвійним»
 
@@ -939,7 +939,8 @@ def load_config():
     for k in _CONFIG_TUNABLES:
         v = cfg.get(k.lower())
         if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
-            g[k] = v
+            # Migrate the former default EN→UK threshold (3) to 2.
+            g[k] = 2 if k == "MIN_EN_TO_UK" and v == 3 else v
     _dbg(f"config loaded: {_config_snapshot()}")
 
 

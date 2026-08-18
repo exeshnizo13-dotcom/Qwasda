@@ -38,7 +38,7 @@ class Config:
     auto_correct_enabled: bool = True
     learning_enabled: bool = True
     min_autocorrect_len: int = 2
-    min_en_to_uk: int = 3
+    min_en_to_uk: int = 2
     double_tap_window: float = 0.4
     hotkeys: HotkeyBindings = field(default_factory=default_hotkeys)
     statistics_enabled: bool = False
@@ -121,7 +121,11 @@ class ConfigManager:
                     and isinstance(data["min_en_to_uk"], int)
                     and data["min_en_to_uk"] > 0
                 ):
-                    self._config.min_en_to_uk = data["min_en_to_uk"]
+                    # Version 1 shipped with 3 as the default.  Treat that
+                    # value as the old default so existing installs get the
+                    # new two-letter-word behavior on their next save.
+                    value = data["min_en_to_uk"]
+                    self._config.min_en_to_uk = 2 if value == 3 else value
                 if (
                     "double_tap_window" in data
                     and isinstance(data["double_tap_window"], (int, float))

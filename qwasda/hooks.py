@@ -42,7 +42,9 @@ from .win32 import (
     UP_MSGS,
     VK_BACK,
     VK_CAPITAL,
+    VK_RETURN,
     VK_SHIFT,
+    VK_TAB,
     WH_KEYBOARD_LL,
     WH_MOUSE_LL,
     WORD_BREAK_VKS,
@@ -229,6 +231,8 @@ class CorrectionTask:
     seq: int
     is_manual: bool = False
     phrase: list[PhraseToken] | None = None
+    input_reserved: bool = False
+    separator_suppressed: bool = False
 
 
 class CorrectionWorker:
@@ -256,6 +260,11 @@ class CorrectionWorker:
         # An RLock keeps those nested state transitions from deadlocking the
         # worker after the first batched or manual conversion.
         self._lock = threading.RLock()
+        # Once a real word boundary is queued, hold subsequent physical input
+        # until that word has been checked.  This makes the boundary a strict
+        # ordering point: the second word cannot overtake correction of the
+        # first one merely because the background thread was scheduled late.
+        self._input_gate = threading.Lock()
         self._correcting = False
         self._input_seq = 0
         self._pending_corrections: list[tuple[int, str, int, int, bool]] = []
@@ -269,9 +278,18 @@ class CorrectionWorker:
         self._queue.put(task)
 
     def increment_seq(self) -> int:
-        with self._lock:
-            self._input_seq += 1
-            return self._input_seq
+        with self._input_gate:
+            with self._lock:
+                self._input_seq += 1
+                return self._input_seq
+
+    def reserve_input(self) -> None:
+        """Pause later physical key-down events until a boundary task finishes."""
+        self._input_gate.acquire()
+
+    def release_input(self) -> None:
+        """Release a boundary reservation acquired by the keyboard hook."""
+        self._input_gate.release()
 
     def get_seq(self) -> int:
         with self._lock:
@@ -295,7 +313,11 @@ class CorrectionWorker:
             except Exception:
                 pass  # Log in production
             finally:
-                self._queue.task_done()
+                try:
+                    if task.input_reserved:
+                        self.release_input()
+                finally:
+                    self._queue.task_done()
 
     def shutdown(self) -> None:
         self._queue.put(None)
@@ -313,11 +335,20 @@ class CorrectionWorker:
                 return
             self._correcting = True
 
-            # Allow separator to appear on screen first
-            time.sleep(0.03)
+            # A task with a word is queued from the punctuation/space key-down,
+            # so its separator still needs a moment to reach the target app.
+            # An empty task represents a following separator (for example the
+            # space after ``Здається,``); it is already visible by the time the
+            # worker reaches it.  Waiting again let the second word start and
+            # unnecessarily postponed correction until that word's boundary.
+            if task.scans and not task.separator_suppressed:
+                time.sleep(0.03)
 
-            # Check if user kept typing (underlying layout may have changed
-            layout = self.get_layout(True)
+            # Use the source layout captured by the hook at the word boundary.
+            # The user can switch layouts while this task waits in the queue;
+            # probing here would then reinterpret the already-visible word as
+            # if it had been typed in the new layout and skip its correction.
+            layout = task.layout
 
             converted, target = autocorrect_replacement(
                 task.scans,
@@ -329,6 +360,8 @@ class CorrectionWorker:
             )
 
             if not converted and not self._pending_corrections:
+                if task.separator_suppressed:
+                    self._send_sep(task.sep_vk, task.sep_shifted)
                 self._correcting = False
                 return
 
@@ -338,12 +371,30 @@ class CorrectionWorker:
                     self._pending_corrections.append(
                         (len(task.scans), converted, target, task.sep_vk, task.sep_shifted)
                     )
+                elif self._pending_corrections:
+                    # Keep the pending range contiguous.  Once the first word
+                    # establishes the intended layout, an unknown/short word
+                    # between it and the eventual pause still has to be
+                    # included in the later batch replacement.  Dropping the
+                    # range here used to leave text such as ``ntgth ws`` on
+                    # screen and only switch the layout for the next word.
+                    pending_target = self._pending_corrections[-1][2]
+                    passthrough = self._scans_to_layout(task.scans, pending_target)
+                    self._pending_corrections.append(
+                        (
+                            len(task.scans),
+                            passthrough,
+                            pending_target,
+                            task.sep_vk,
+                            task.sep_shifted,
+                        )
+                    )
                 else:
                     self._pending_corrections.clear()
                 self._correcting = False
                 return
 
-            sep_len = 1 if task.sep_vk else 0
+            sep_len = 1 if task.sep_vk and not task.separator_suppressed else 0
             pending = list(self._pending_corrections)
             self._pending_corrections.clear()
 
@@ -352,14 +403,27 @@ class CorrectionWorker:
 
             if converted is None or target is None:
                 # Current word OK, but have pending - apply them
-                cur_text = self._scans_to_text(task.scans, layout)
+                pending_target = pending[-1][2]
+                cur_text = self._scans_to_layout(task.scans, pending_target)
                 self._replace_batch(
-                    pending, len(task.scans), cur_text, layout, task.sep_vk, task.sep_shifted
+                    pending,
+                    len(task.scans),
+                    cur_text,
+                    pending_target,
+                    task.sep_vk,
+                    task.sep_shifted,
+                    not task.separator_suppressed,
                 )
                 self.clear_autocorrect_undo()
             elif pending:
                 self._replace_batch(
-                    pending, len(task.scans), converted, target, task.sep_vk, task.sep_shifted
+                    pending,
+                    len(task.scans),
+                    converted,
+                    target,
+                    task.sep_vk,
+                    task.sep_shifted,
+                    not task.separator_suppressed,
                 )
                 self.clear_autocorrect_undo()
                 if self.statistics:
@@ -393,10 +457,10 @@ class CorrectionWorker:
     ) -> None:
         send_backspaces(strip_len)
         time.sleep(0.02)
+        set_foreground_layout(target_layout)
+        time.sleep(0.02)
         send_unicode_string(text)
         self._send_sep(sep_vk, sep_shifted)
-        time.sleep(0.02)
-        set_foreground_layout(target_layout)
 
     def _replace_batch(
         self,
@@ -406,12 +470,15 @@ class CorrectionWorker:
         cur_target: int,
         cur_sep_vk: int,
         cur_sep_shifted: bool,
+        cur_sep_visible: bool = True,
     ) -> None:
-        total_bs = (1 if cur_sep_vk else 0) + cur_len
+        total_bs = (1 if cur_sep_vk and cur_sep_visible else 0) + cur_len
         for orig_len, _, _, psep_vk, _ in pending:
             total_bs += orig_len + (1 if psep_vk else 0)
 
         send_backspaces(total_bs)
+        time.sleep(0.02)
+        set_foreground_layout(cur_target)
         time.sleep(0.02)
 
         for _, ptext, _, psep_vk, psep_shifted in pending:
@@ -420,8 +487,6 @@ class CorrectionWorker:
 
         send_unicode_string(cur_text)
         self._send_sep(cur_sep_vk, cur_sep_shifted)
-        time.sleep(0.02)
-        set_foreground_layout(cur_target)
 
     def _send_sep(self, vk: int, shifted: bool) -> None:
         if vk == 0x20:  # Space
@@ -433,10 +498,10 @@ class CorrectionWorker:
             time.sleep(0.005)
             send_key_shifted(vk, shifted)
 
-    def _scans_to_text(self, scans: list[tuple[int, bool]], layout: int) -> str:
+    def _scans_to_layout(self, scans: list[tuple[int, bool]], layout: int) -> str:
         from .conversion import scans_to_eng, scans_to_ukr
 
-        return scans_to_eng(scans) if layout == LANG_UKRAINIAN else scans_to_ukr(scans)
+        return scans_to_ukr(scans) if layout == LANG_UKRAINIAN else scans_to_eng(scans)
 
     # -------------------------------------------------------------------------
     # Manual conversion
@@ -477,6 +542,8 @@ class CorrectionWorker:
     def _replace_phrase(self, segments: list[PhraseSegment], strip_len: int, target: int) -> None:
         send_backspaces(strip_len)
         time.sleep(0.02)
+        set_foreground_layout(target)
+        time.sleep(0.02)
         for kind, val in segments:
             if kind == "text":
                 assert isinstance(val, str)
@@ -487,8 +554,6 @@ class CorrectionWorker:
                 else:
                     assert isinstance(val, int)
                     self._send_sep(val, False)
-        time.sleep(0.02)
-        set_foreground_layout(target)
 
     def _learn_from_phrase(
         self, phrase: list[PhraseToken], from_layout: int, to_layout: int
@@ -532,10 +597,10 @@ class CorrectionWorker:
 
         send_backspaces(len(converted) + (1 if sep_vk else 0))
         time.sleep(0.02)
+        set_foreground_layout(from_layout)
+        time.sleep(0.02)
         send_unicode_string(orig_text)
         self._send_sep(sep_vk, sep_shifted)
-        time.sleep(0.02)
-        set_foreground_layout(from_layout)
 
         if self.config.learning_enabled:
             self.learning.learn_block_word(orig_text.lower(), from_layout)
@@ -597,6 +662,36 @@ class KeyboardHook:
     def clear_typed_scans(self) -> None:
         """Discard the partial word when the caret moves outside this hook."""
         self._typed_scans.clear()
+
+    def _enqueue_auto(
+        self,
+        scans: list[Scan],
+        layout: int,
+        sep_vk: int,
+        sep_shifted: bool,
+        suppress_separator: bool = False,
+    ) -> None:
+        """Queue a boundary check and keep later input behind a real word."""
+        reserved = bool(scans)
+        if reserved:
+            self.worker.reserve_input()
+        try:
+            self.worker.enqueue(
+                CorrectionTask(
+                    scans=scans,
+                    layout=layout,
+                    sep_vk=sep_vk,
+                    sep_shifted=sep_shifted,
+                    seq=self.worker._input_seq,
+                    is_manual=False,
+                    input_reserved=reserved,
+                    separator_suppressed=suppress_separator,
+                )
+            )
+        except BaseException:
+            if reserved:
+                self.worker.release_input()
+            raise
 
     def _hook_proc(self, nCode: int, wParam: int, lParam: int) -> int:
         if nCode < 0:
@@ -698,27 +793,17 @@ class KeyboardHook:
 
         # Word break (Space, Enter, Tab)
         if vk in WORD_BREAK_VKS:
-            if (
-                self.config.auto_correct_enabled
-                and self._typed_scans
-                and not self.caret_guard.on_word_break()
-            ):
+            suppressed = self.caret_guard.on_word_break()
+            suppress_separator = False
+            if self.config.auto_correct_enabled and not suppressed:
                 scans = list(self._typed_scans)
                 layout = self.get_layout(True)
-                self.worker.enqueue(
-                    CorrectionTask(
-                        scans=scans,
-                        layout=layout,
-                        sep_vk=vk,
-                        sep_shifted=False,
-                        seq=self.worker._input_seq,
-                        is_manual=False,
-                    )
-                )
-            else:
-                self.caret_guard.on_word_break()
+                suppress_separator = bool(scans) and vk in (VK_RETURN, VK_TAB)
+                self._enqueue_auto(scans, layout, vk, False, suppress_separator)
             self.phrase_buffer.add_sep(vk)
             self._typed_scans.clear()
+            if suppress_separator:
+                return 1
             return _call_next_hook(self._hook, nCode, wParam, lParam)
 
         # Letter keys (by scan code)
@@ -744,16 +829,7 @@ class KeyboardHook:
         ):
             scans = list(self._typed_scans)
             layout = self.get_layout(True)
-            self.worker.enqueue(
-                CorrectionTask(
-                    scans=scans,
-                    layout=layout,
-                    sep_vk=vk,
-                    sep_shifted=term_shifted,
-                    seq=self.worker._input_seq,
-                    is_manual=False,
-                )
-            )
+            self._enqueue_auto(scans, layout, vk, term_shifted)
         else:
             self.caret_guard.on_word_break()
 
