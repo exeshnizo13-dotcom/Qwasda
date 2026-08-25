@@ -523,7 +523,7 @@ class QwasdaEngine:
 
         # Window change check
         if self._foreground_changed():
-            self.worker._pending_corrections.clear()
+            self.worker.clear_pending()
             self.worker.clear_autocorrect_undo()
             self.phrase_buffer.clear()
             self.caret_guard.on_focus_change()
@@ -551,7 +551,7 @@ class QwasdaEngine:
         if any_modifier_down():
             self.typed_scans.clear()
             self.phrase_buffer.clear()
-            self.worker._pending_corrections.clear()
+            self.worker.clear_pending()
             return
 
         if not self._enabled.is_set():
@@ -562,14 +562,14 @@ class QwasdaEngine:
             if self.typed_scans:
                 self.typed_scans.pop()
             self.phrase_buffer.backspace()
-            self.worker._pending_corrections.clear()
+            self.worker.clear_pending()
             return
 
         # Navigation keys
         if vk in NAV_CLEAR_VKS:
             self.typed_scans.clear()
             self.phrase_buffer.clear()
-            self.worker._pending_corrections.clear()
+            self.worker.clear_pending()
             self.caret_guard.on_nav()
             return
 
@@ -674,7 +674,7 @@ class QwasdaEngine:
             self.typed_scans.clear()
             self.phrase_buffer.clear()
             assert self.worker is not None
-            self.worker._pending_corrections.clear()
+            self.worker.clear_pending()
             self.worker.clear_autocorrect_undo()
         if self.config_manager:
             self.config_manager.save_config()

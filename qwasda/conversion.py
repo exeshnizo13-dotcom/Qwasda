@@ -296,18 +296,20 @@ def autocorrect_target(
     if layout == LANG_UKRAINIAN:
         if ukr_l in learning.block_uk:
             return None, None
+        if eng_l in learning.force_en:
+            return eng, LANG_ENGLISH
         if dict_loader.contains_uk(ukr_l):
             return None, None
-        if dict_loader.contains_en(eng_l) or eng_l in learning.force_en:
+        if dict_loader.contains_en(eng_l):
             return eng, LANG_ENGLISH
     else:
         if eng_l in learning.block_en:
             return None, None
+        if ukr_l in learning.force_uk:
+            return ukr, LANG_UKRAINIAN
         if dict_loader.contains_en(eng_l):
             return None, None
-        if ukr_l in learning.force_uk or (
-            len(scans) >= min_en_to_uk and dict_loader.contains_uk(ukr_l)
-        ):
+        if len(scans) >= min_en_to_uk and dict_loader.contains_uk(ukr_l):
             return ukr, LANG_UKRAINIAN
 
     return None, None

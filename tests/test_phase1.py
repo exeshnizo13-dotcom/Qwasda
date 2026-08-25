@@ -195,6 +195,40 @@ def test_correction_worker_state_lock_is_reentrant():
         worker.shutdown()
 
 
+def test_manual_switch_undoes_autocorrect_before_converting_phrase(monkeypatch):
+    from qwasda.hooks import CorrectionTask, CorrectionWorker
+
+    worker = CorrectionWorker(
+        dict_loader=MagicMock(),
+        learning=MagicMock(),
+        config=MagicMock(),
+        get_layout_func=MagicMock(return_value=0x0409),
+    )
+    try:
+        worker._autocorrect_undo_available = True
+        worker._last_autocorrect = ([(30, False)], 0x0409, 0x0422, "ф", 0x20, False)
+        undo = MagicMock()
+        monkeypatch.setattr(worker, "_undo_autocorrect", undo)
+        monkeypatch.setattr(worker, "_replace_phrase", MagicMock())
+
+        worker._do_manual(
+            CorrectionTask(
+                scans=[],
+                layout=0,
+                sep_vk=0,
+                sep_shifted=False,
+                seq=0,
+                is_manual=True,
+                phrase=[("w", [(30, False)])],
+            )
+        )
+
+        undo.assert_called_once_with()
+        worker._replace_phrase.assert_not_called()
+    finally:
+        worker.shutdown()
+
+
 def test_replacement_switches_layout_before_separator(monkeypatch):
     from qwasda.hooks import CorrectionWorker
     from qwasda import LANG_UKRAINIAN
@@ -367,6 +401,124 @@ def test_empty_space_flushes_pending_word_terminated_by_punctuation(monkeypatch)
         worker.shutdown()
 
 
+def test_later_layout_context_converts_ambiguous_phrase_prefix(monkeypatch):
+    from qwasda import LANG_ENGLISH, LANG_UKRAINIAN
+    from qwasda.conversion import SCAN_ENG
+    from qwasda.hooks import CorrectionTask, CorrectionWorker
+
+    scan_by_char = {character: scan for scan, character in SCAN_ENG.items()}
+
+    def scans(text):
+        return [(scan_by_char[character], False) for character in text]
+
+    dict_loader = MagicMock(dicts_loaded=True)
+    dict_loader.contains_en.side_effect = lambda word: word == "ye"
+    dict_loader.contains_uk.side_effect = lambda word: word in {"ну", "час"}
+    learning = MagicMock(
+        block_en=set(),
+        block_uk=set(),
+        force_en=set(),
+        force_uk=set(),
+    )
+    worker = CorrectionWorker(
+        dict_loader=dict_loader,
+        learning=learning,
+        config=MagicMock(min_autocorrect_len=2, min_en_to_uk=2),
+        get_layout_func=MagicMock(return_value=LANG_UKRAINIAN),
+    )
+    batch = MagicMock()
+    monkeypatch.setattr(worker, "_replace_batch", batch)
+    monkeypatch.setattr("qwasda.hooks.time.sleep", lambda _seconds: None)
+
+    try:
+        tasks = [
+            CorrectionTask(scans("ye"), LANG_ENGLISH, 0xBF, True, seq=1),
+            CorrectionTask([], LANG_ENGLISH, 0x20, False, seq=2),
+            CorrectionTask(scans("zrbcm"), LANG_ENGLISH, 0x20, False, seq=3),
+            # Physical ``xfc`` reads as ``час`` after the user/application has
+            # switched to Ukrainian, confirming the language of the prefix.
+            CorrectionTask(scans("xfc"), LANG_UKRAINIAN, 0x20, False, seq=4),
+        ]
+        for task in tasks:
+            worker._input_seq = task.seq
+            worker._do_auto(task)
+
+        batch.assert_called_once_with(
+            [
+                (2, "ну", LANG_UKRAINIAN, 0xBF, True),
+                (0, "", LANG_UKRAINIAN, 0x20, False),
+                (5, "якись", LANG_UKRAINIAN, 0x20, False),
+            ],
+            3,
+            "час",
+            LANG_UKRAINIAN,
+            0x20,
+            False,
+            True,
+        )
+        assert worker._deferred_prefix == []
+    finally:
+        worker.shutdown()
+
+
+def test_manual_switch_learns_ambiguous_dictionary_word():
+    from qwasda import LANG_ENGLISH, LANG_UKRAINIAN
+    from qwasda.conversion import SCAN_ENG
+    from qwasda.hooks import CorrectionWorker
+
+    scan_by_char = {character: scan for scan, character in SCAN_ENG.items()}
+    word_scans = [(scan_by_char[character], False) for character in "ye"]
+    learning = MagicMock()
+    learning.learn_valid_word.return_value = True
+    worker = CorrectionWorker(
+        dict_loader=MagicMock(dicts_loaded=True),
+        learning=learning,
+        config=MagicMock(min_autocorrect_len=2),
+        get_layout_func=MagicMock(return_value=LANG_ENGLISH),
+    )
+    try:
+        worker._learn_from_phrase([("w", word_scans)], LANG_ENGLISH, LANG_UKRAINIAN)
+
+        learning.learn_valid_word.assert_called_once_with("ну", LANG_UKRAINIAN)
+        learning.save.assert_called_once_with()
+    finally:
+        worker.shutdown()
+
+
+def test_layout_change_does_not_rewrite_valid_mixed_language_prefix(monkeypatch):
+    from qwasda import LANG_ENGLISH, LANG_UKRAINIAN
+    from qwasda.conversion import SCAN_ENG
+    from qwasda.hooks import CorrectionTask, CorrectionWorker
+
+    scan_by_char = {character: scan for scan, character in SCAN_ENG.items()}
+
+    def scans(text):
+        return [(scan_by_char[character], False) for character in text]
+
+    dict_loader = MagicMock(dicts_loaded=True)
+    dict_loader.contains_en.side_effect = lambda word: word == "ye"
+    dict_loader.contains_uk.side_effect = lambda word: word in {"ну", "час"}
+    worker = CorrectionWorker(
+        dict_loader=dict_loader,
+        learning=MagicMock(block_en=set(), block_uk=set(), force_en=set(), force_uk=set()),
+        config=MagicMock(min_autocorrect_len=2, min_en_to_uk=2),
+        get_layout_func=MagicMock(return_value=LANG_UKRAINIAN),
+    )
+    batch = MagicMock()
+    monkeypatch.setattr(worker, "_replace_batch", batch)
+    monkeypatch.setattr("qwasda.hooks.time.sleep", lambda _seconds: None)
+    try:
+        worker._input_seq = 1
+        worker._do_auto(CorrectionTask(scans("ye"), LANG_ENGLISH, 0x20, False, seq=1))
+        worker._input_seq = 2
+        worker._do_auto(CorrectionTask(scans("xfc"), LANG_UKRAINIAN, 0x20, False, seq=2))
+
+        batch.assert_not_called()
+        assert worker._deferred_prefix == []
+    finally:
+        worker.shutdown()
+
+
 def test_keyboard_hook_enqueues_empty_space_after_punctuation(monkeypatch):
     import ctypes
 
@@ -392,7 +544,6 @@ def test_keyboard_hook_enqueues_empty_space_after_punctuation(monkeypatch):
         get_layout_func=MagicMock(return_value=LANG_ENGLISH),
     )
     monkeypatch.setattr(hook, "_foreground_changed", lambda: False)
-    monkeypatch.setattr("qwasda.hooks.any_modifier_down", lambda: False)
     monkeypatch.setattr("qwasda.hooks._call_next_hook", lambda *args: 0)
     event = KBDLLHOOKSTRUCT(vkCode=0x20, scanCode=0x39, flags=0, time=0)
 
@@ -421,9 +572,10 @@ def test_keyboard_hook_suppresses_enter_until_word_is_checked(monkeypatch):
     caret_guard.on_word_break.return_value = False
     enabled = threading.Event()
     enabled.set()
+    phrase_buffer = MagicMock()
     hook = KeyboardHook(
         worker=worker,
-        phrase_buffer=MagicMock(),
+        phrase_buffer=phrase_buffer,
         caret_guard=caret_guard,
         double_tap=DoubleTapDetector(),
         config=MagicMock(auto_correct_enabled=True, double_tap_window=0.4),
@@ -432,7 +584,6 @@ def test_keyboard_hook_suppresses_enter_until_word_is_checked(monkeypatch):
     )
     hook._typed_scans = [(0x19, True), (0x26, False), (0x21, False)]
     monkeypatch.setattr(hook, "_foreground_changed", lambda: False)
-    monkeypatch.setattr("qwasda.hooks.any_modifier_down", lambda: False)
     monkeypatch.setattr("qwasda.hooks._call_next_hook", lambda *args: 0)
     event = KBDLLHOOKSTRUCT(vkCode=VK_RETURN, scanCode=0x1C, flags=0, time=0)
 
@@ -443,6 +594,8 @@ def test_keyboard_hook_suppresses_enter_until_word_is_checked(monkeypatch):
     assert task.sep_vk == VK_RETURN
     assert task.separator_suppressed is True
     assert task.input_reserved is True
+    phrase_buffer.clear.assert_called_once_with()
+    phrase_buffer.add_sep.assert_not_called()
 
 
 def test_suppressed_enter_is_replayed_once_after_correction(monkeypatch):
@@ -548,6 +701,131 @@ def test_keyboard_hook_reserves_input_at_first_word_boundary():
     assert task.input_reserved is True
 
 
+def test_keyboard_hook_keeps_layout_from_first_letter_when_layout_changes(monkeypatch):
+    import ctypes
+
+    from qwasda import LANG_ENGLISH, LANG_UKRAINIAN
+    from qwasda.conversion import SCAN_ENG
+    from qwasda.hooks import DoubleTapDetector, KeyboardHook
+    from qwasda.win32 import KBDLLHOOKSTRUCT, VK_SHIFT, WM_KEYDOWN
+
+    scan_by_char = {character: scan for scan, character in SCAN_ENG.items()}
+    worker = MagicMock()
+    worker._correcting = False
+    worker._input_seq = 12
+    caret_guard = MagicMock()
+    caret_guard.on_word_break.return_value = False
+    enabled = threading.Event()
+    enabled.set()
+    get_layout = MagicMock(return_value=LANG_ENGLISH)
+    hook = KeyboardHook(
+        worker=worker,
+        phrase_buffer=MagicMock(),
+        caret_guard=caret_guard,
+        double_tap=DoubleTapDetector(),
+        config=MagicMock(auto_correct_enabled=True, double_tap_window=0.4),
+        enabled_flag=enabled,
+        get_layout_func=get_layout,
+    )
+    monkeypatch.setattr(hook, "_foreground_changed", lambda: False)
+    monkeypatch.setattr("qwasda.hooks._call_next_hook", lambda *args: 0)
+    monkeypatch.setattr(
+        "qwasda.hooks.user32.GetKeyState",
+        lambda vk: 0x8000 if vk == VK_SHIFT else 0,
+    )
+
+    first_letter = KBDLLHOOKSTRUCT(
+        vkCode=ord("Z"), scanCode=scan_by_char["z"], flags=0, time=0
+    )
+    hook._hook_proc(0, WM_KEYDOWN, ctypes.addressof(first_letter))
+    assert hook._word_layout == LANG_ENGLISH
+
+    expected_scans = [
+        (scan_by_char["z"], True),
+        (scan_by_char["r"], False),
+        (scan_by_char["o"], False),
+        (scan_by_char["j"], False),
+    ]
+    hook._typed_scans = list(expected_scans)
+    get_layout.return_value = LANG_UKRAINIAN
+    space = KBDLLHOOKSTRUCT(vkCode=0x20, scanCode=0x39, flags=0, time=0)
+    hook._hook_proc(0, WM_KEYDOWN, ctypes.addressof(space))
+
+    task = worker.enqueue.call_args.args[0]
+    assert task.layout == LANG_ENGLISH
+    assert task.scans == expected_scans
+    assert get_layout.call_count == 1
+
+
+def test_keyboard_hook_captures_first_letter_immediately_after_alt_release(monkeypatch):
+    import ctypes
+
+    from qwasda import LANG_ENGLISH
+    from qwasda.conversion import SCAN_ENG
+    from qwasda.hooks import DoubleTapDetector, KeyboardHook
+    from qwasda.win32 import KBDLLHOOKSTRUCT, VK_LMENU, WM_KEYDOWN, WM_KEYUP
+
+    worker = MagicMock()
+    worker._correcting = False
+    worker._input_seq = 13
+    enabled = threading.Event()
+    enabled.set()
+    get_layout = MagicMock(return_value=LANG_ENGLISH)
+    hook = KeyboardHook(
+        worker=worker,
+        phrase_buffer=MagicMock(),
+        caret_guard=MagicMock(),
+        double_tap=DoubleTapDetector(),
+        config=MagicMock(auto_correct_enabled=True, double_tap_window=0.4),
+        enabled_flag=enabled,
+        get_layout_func=get_layout,
+    )
+    monkeypatch.setattr(hook, "_foreground_changed", lambda: False)
+    monkeypatch.setattr("qwasda.hooks._call_next_hook", lambda *args: 0)
+    monkeypatch.setattr("qwasda.hooks.user32.GetKeyState", lambda vk: 0)
+
+    alt = KBDLLHOOKSTRUCT(vkCode=VK_LMENU, scanCode=0x38, flags=0, time=0)
+    hook._hook_proc(0, WM_KEYDOWN, ctypes.addressof(alt))
+    hook._hook_proc(0, WM_KEYUP, ctypes.addressof(alt))
+
+    scan_y = next(scan for scan, character in SCAN_ENG.items() if character == "y")
+    first_letter = KBDLLHOOKSTRUCT(vkCode=ord("Y"), scanCode=scan_y, flags=0, time=0)
+    hook._hook_proc(0, WM_KEYDOWN, ctypes.addressof(first_letter))
+
+    assert hook._typed_scans == [(scan_y, False)]
+    assert hook._word_layout == LANG_ENGLISH
+
+
+def test_win_space_layout_switch_preserves_deferred_phrase_context(monkeypatch):
+    import ctypes
+
+    from qwasda import LANG_ENGLISH
+    from qwasda.hooks import DoubleTapDetector, KeyboardHook
+    from qwasda.win32 import KBDLLHOOKSTRUCT, VK_LWIN, VK_SPACE, WM_KEYDOWN
+
+    worker = MagicMock(_correcting=False, _input_seq=0)
+    enabled = threading.Event()
+    enabled.set()
+    hook = KeyboardHook(
+        worker=worker,
+        phrase_buffer=MagicMock(),
+        caret_guard=MagicMock(),
+        double_tap=DoubleTapDetector(),
+        config=MagicMock(auto_correct_enabled=True, double_tap_window=0.4),
+        enabled_flag=enabled,
+        get_layout_func=MagicMock(return_value=LANG_ENGLISH),
+    )
+    monkeypatch.setattr(hook, "_foreground_changed", lambda: False)
+    monkeypatch.setattr("qwasda.hooks._call_next_hook", lambda *args: 0)
+
+    win = KBDLLHOOKSTRUCT(vkCode=VK_LWIN, scanCode=0x5B, flags=0, time=0)
+    space = KBDLLHOOKSTRUCT(vkCode=VK_SPACE, scanCode=0x39, flags=0, time=0)
+    hook._hook_proc(0, WM_KEYDOWN, ctypes.addressof(win))
+    hook._hook_proc(0, WM_KEYDOWN, ctypes.addressof(space))
+
+    worker.clear_pending.assert_not_called()
+
+
 def test_worker_releases_input_reservation_after_boundary_task(monkeypatch):
     from qwasda import LANG_ENGLISH
     from qwasda.hooks import CorrectionTask, CorrectionWorker
@@ -600,6 +878,6 @@ def test_mouse_click_resets_keyboard_context_and_suppresses_fragment_correction(
     worker.increment_seq.assert_called_once_with()
     keyboard_hook.clear_typed_scans.assert_called_once_with()
     phrase_buffer.clear.assert_called_once_with()
-    worker._pending_corrections.clear.assert_called_once_with()
+    worker.clear_pending.assert_called_once_with()
     worker.clear_autocorrect_undo.assert_called_once_with()
     caret_guard.on_nav.assert_called_once_with()

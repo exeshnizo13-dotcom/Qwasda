@@ -72,6 +72,8 @@ ERROR_ALREADY_EXISTS = 183
 
 # Modifier key sets
 CTRL_VKS = frozenset({VK_CONTROL, VK_LCONTROL, VK_RCONTROL})
+ALT_VKS = frozenset({VK_MENU, VK_LMENU, VK_RMENU})
+WIN_VKS = frozenset({VK_LWIN, VK_RWIN})
 MODIFIER_VKS = frozenset(
     {
         VK_SHIFT,

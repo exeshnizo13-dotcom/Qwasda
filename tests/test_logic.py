@@ -201,7 +201,7 @@ def dicts(tmp_path, monkeypatch):
     # Use temp directory for learned words to avoid loading real data
     monkeypatch.setattr(qwasda, "APP_DIR", str(tmp_path))
     monkeypatch.setattr(qwasda, "LEARNED_PATH", str(tmp_path / "learned.json"))
-    monkeypatch.setattr(qwasda, "DICT_EN", frozenset({"hello", "the", "cat"}))
+    monkeypatch.setattr(qwasda, "DICT_EN", frozenset({"hello", "the", "cat", "ye"}))
     monkeypatch.setattr(
         qwasda,
         "DICT_UK",
@@ -219,8 +219,11 @@ def dicts(tmp_path, monkeypatch):
                 "кіт",
                 "так",
                 "не",
+                "ну",
                 "це",
+                "завтра",
                 "здається",
+                "якщо",
             ]
         ),
     )
@@ -277,9 +280,26 @@ def test_autocorrect_en_to_uk(dicts):
     assert target == LANG_UKRAINIAN
 
 
+def test_autocorrect_en_to_uk_converts_first_word_of_mixed_phrase(dicts):
+    assert _autocorrect_target(scans("pfdnhf"), LANG_ENGLISH) == (
+        "завтра",
+        LANG_UKRAINIAN,
+    )
+
+
+def test_autocorrect_en_to_uk_preserves_capital_in_mixed_phrase(dicts):
+    assert _autocorrect_target(
+        scans("zroj", [True, False, False, False]), LANG_ENGLISH
+    ) == ("Якщо", LANG_UKRAINIAN)
+
+
 def test_autocorrect_en_to_uk_accepts_two_letter_dictionary_word(dicts):
     assert _autocorrect_target(scans("yt"), LANG_ENGLISH) == ("не", LANG_UKRAINIAN)
     assert _autocorrect_target(scans("wt"), LANG_ENGLISH) == ("це", LANG_UKRAINIAN)
+
+
+def test_ambiguous_dictionary_word_waits_for_context(dicts, learned):
+    assert _autocorrect_target(scans("ye"), LANG_ENGLISH) == (None, None)
 
 
 def test_autocorrect_en_to_uk_accepts_word_with_oem_letter_position(dicts):
@@ -617,6 +637,13 @@ def test_force_uk_bypasses_len_threshold(dicts, learned, monkeypatch):
     conv, target = _autocorrect_target(scans("rj"), LANG_ENGLISH)
     assert conv == "ко"
     assert target == LANG_UKRAINIAN
+
+
+def test_force_uk_overrides_valid_current_layout_word(dicts, learned):
+    # Learned intent must win even when the physical-key spelling is also a
+    # dictionary word in the current layout (``ye`` ↔ ``ну``).
+    qwasda.FORCE_UK.add("ну")
+    assert _autocorrect_target(scans("ye"), LANG_ENGLISH) == ("ну", LANG_UKRAINIAN)
 
 
 def test_block_uk_prevents_autocorrect(dicts, learned):

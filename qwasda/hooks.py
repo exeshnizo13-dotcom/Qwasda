@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 from .conversion import LETTER_SCANS, PhraseSegment, PhraseToken, Scan
 from .win32 import (
+    ALT_VKS,
     CTRL_VKS,
     DOWN_MSGS,
     HOOKPROC,
@@ -44,11 +45,12 @@ from .win32 import (
     VK_CAPITAL,
     VK_RETURN,
     VK_SHIFT,
+    VK_SPACE,
     VK_TAB,
+    WIN_VKS,
     WH_KEYBOARD_LL,
     WH_MOUSE_LL,
     WORD_BREAK_VKS,
-    any_modifier_down,
     send_backspaces,
     send_key,
     send_key_shifted,
@@ -56,6 +58,17 @@ from .win32 import (
     set_foreground_layout,
     user32,
 )
+
+
+def _shortcut_modifier_family(vk: int) -> str | None:
+    """Normalize left/right modifier variants for reliable key-up tracking."""
+    if vk in CTRL_VKS:
+        return "ctrl"
+    if vk in ALT_VKS:
+        return "alt"
+    if vk in WIN_VKS:
+        return "win"
+    return None
 
 
 def _call_next_hook(hook: ctypes.c_void_p | None, n_code: int, w_param: int, l_param: int) -> int:
@@ -268,6 +281,14 @@ class CorrectionWorker:
         self._correcting = False
         self._input_seq = 0
         self._pending_corrections: list[tuple[int, str, int, int, bool]] = []
+        # A phrase may begin with a word that is valid in both layouts (for
+        # example ``ye`` in English and ``ну`` in Ukrainian).  Keep that
+        # unresolved prefix until a later unambiguous correction or an actual
+        # layout change supplies context, then rewrite the prefix as one batch.
+        self._deferred_prefix: list[tuple[int, str, int, int, bool]] = []
+        self._deferred_source_layout: int | None = None
+        self._deferred_target_layout: int | None = None
+        self._deferred_has_source_mismatch = False
         self._last_autocorrect: tuple[list[Scan], int, int, str, int, bool] | None = None
         self._autocorrect_undo_available = False
 
@@ -299,6 +320,18 @@ class CorrectionWorker:
         with self._lock:
             self._autocorrect_undo_available = False
             self._last_autocorrect = None
+
+    def clear_pending(self) -> None:
+        """Discard confirmed corrections and unresolved phrase context."""
+        with self._lock:
+            self._pending_corrections.clear()
+            self._clear_deferred_prefix()
+
+    def _clear_deferred_prefix(self) -> None:
+        self._deferred_prefix.clear()
+        self._deferred_source_layout = None
+        self._deferred_target_layout = None
+        self._deferred_has_source_mismatch = False
 
     def _run(self) -> None:
         while True:
@@ -358,6 +391,10 @@ class CorrectionWorker:
                 self.config.min_autocorrect_len,
                 self.config.min_en_to_uk,
             )
+
+            if self._defer_or_confirm_prefix(task, converted, target):
+                self._correcting = False
+                return
 
             if not converted and not self._pending_corrections:
                 if task.separator_suppressed:
@@ -514,6 +551,17 @@ class CorrectionWorker:
             if self._correcting:
                 return
             self._correcting = True
+            self.clear_pending()
+
+            # Auto-correct undo takes precedence over the phrase buffer.  The
+            # buffer deliberately spans word boundaries and therefore still
+            # contains the original scans after an auto-correction.  Converting
+            # it first would rewrite the whole phrase instead of restoring the
+            # last corrected word.
+            if self._autocorrect_undo_available and self._last_autocorrect:
+                self._undo_autocorrect()
+                self._correcting = False
+                return
 
             layout = self.get_layout(True)
             phrase = task.phrase or []
@@ -533,11 +581,126 @@ class CorrectionWorker:
                     self._correcting = False
                     return
 
-            # No phrase - check for undo of last auto-correct
-            if self._autocorrect_undo_available and self._last_autocorrect:
-                self._undo_autocorrect()
-
             self._correcting = False
+
+    def _defer_or_confirm_prefix(
+        self,
+        task: CorrectionTask,
+        converted: str | None,
+        target: int | None,
+    ) -> bool:
+        """Resolve ambiguous phrase starts using later layout context.
+
+        Returns True when the task was stored as unresolved context and needs
+        no immediate replacement.  On confirmation, the stored prefix is
+        promoted to the normal batch-replacement path and False is returned.
+        """
+        from .conversion import scans_to_eng, scans_to_ukr
+
+        # Confirmed/race-delayed corrections already define the direction;
+        # let the existing contiguous batch logic handle the current task.
+        if self._pending_corrections and not self._deferred_prefix:
+            return False
+
+        if self._deferred_prefix:
+            source_layout = self._deferred_source_layout
+            target_layout = self._deferred_target_layout
+            if source_layout is None or target_layout is None:
+                self._clear_deferred_prefix()
+                return False
+
+            # A real word in the opposite layout confirms how the unresolved
+            # leading fragment should be read.  An unambiguous auto-correction
+            # in that same direction is equally strong evidence.
+            # A layout change alone can be an intentional mixed-language
+            # phrase (``hello, світ``).  Only use it as confirmation if the
+            # retained prefix also contains a word invalid in its source
+            # layout.  An unambiguous autocorrection is sufficient by itself.
+            layout_confirms = (
+                task.layout == target_layout
+                and bool(task.scans)
+                and self._deferred_has_source_mismatch
+            )
+            correction_confirms = converted is not None and target == target_layout
+            if layout_confirms or correction_confirms:
+                self._pending_corrections = (
+                    list(self._deferred_prefix) + self._pending_corrections
+                )
+                self._clear_deferred_prefix()
+                return False
+
+            # Separators after a physical layout switch still lie between the
+            # prefix and the confirming word, so keep them in the replacement
+            # span.  The next real target-layout word will confirm it.
+            if task.layout == target_layout and not task.scans and task.sep_vk:
+                self._deferred_prefix.append((0, "", target_layout, task.sep_vk, task.sep_shifted))
+                return True
+
+            if task.layout == source_layout and converted is None:
+                if task.sep_vk in (VK_RETURN, VK_TAB):
+                    self._clear_deferred_prefix()
+                    return False
+                text = self._scans_to_layout(task.scans, target_layout)
+                if task.scans:
+                    if source_layout == LANG_ENGLISH:
+                        source = scans_to_eng(task.scans).lower()
+                        source_is_valid = self.dict_loader.contains_en(source)
+                    else:
+                        source = scans_to_ukr(task.scans).lower()
+                        source_is_valid = self.dict_loader.contains_uk(source)
+                    self._deferred_has_source_mismatch |= not source_is_valid
+                self._deferred_prefix.append(
+                    (len(task.scans), text, target_layout, task.sep_vk, task.sep_shifted)
+                )
+                # Bound both retained text and eventual backspace range.
+                if len(self._deferred_prefix) > 64:
+                    self._clear_deferred_prefix()
+                return True
+
+            self._clear_deferred_prefix()
+            return False
+
+        if converted is not None or not task.scans or task.sep_vk in (VK_RETURN, VK_TAB):
+            return False
+        if not self.dict_loader.dicts_loaded:
+            return False
+
+        if task.layout == LANG_ENGLISH:
+            source = scans_to_eng(task.scans).lower()
+            alternative = scans_to_ukr(task.scans).lower()
+            if source in self.learning.block_en:
+                return False
+            ambiguous = self.dict_loader.contains_en(source) and self.dict_loader.contains_uk(
+                alternative
+            )
+            target_layout = LANG_UKRAINIAN
+        elif task.layout == LANG_UKRAINIAN:
+            source = scans_to_ukr(task.scans).lower()
+            alternative = scans_to_eng(task.scans).lower()
+            if source in self.learning.block_uk:
+                return False
+            ambiguous = self.dict_loader.contains_uk(source) and self.dict_loader.contains_en(
+                alternative
+            )
+            target_layout = LANG_ENGLISH
+        else:
+            return False
+
+        if not ambiguous:
+            return False
+
+        self._deferred_source_layout = task.layout
+        self._deferred_target_layout = target_layout
+        self._deferred_prefix.append(
+            (
+                len(task.scans),
+                self._scans_to_layout(task.scans, target_layout),
+                target_layout,
+                task.sep_vk,
+                task.sep_shifted,
+            )
+        )
+        return True
 
     def _replace_phrase(self, segments: list[PhraseSegment], strip_len: int, target: int) -> None:
         send_backspaces(strip_len)
@@ -566,15 +729,9 @@ class CorrectionWorker:
                 continue
             scans = tok[1]
             if from_layout == LANG_UKRAINIAN:
-                src = scans_to_ukr(scans).lower()
                 tgt = scans_to_eng(scans).lower()
-                if self.dict_loader.dicts_loaded and self.dict_loader.contains_uk(src):
-                    continue
             else:
-                src = scans_to_eng(scans).lower()
                 tgt = scans_to_ukr(scans).lower()
-                if self.dict_loader.dicts_loaded and self.dict_loader.contains_en(src):
-                    continue
             from .conversion import is_word_text
 
             if not is_word_text(tgt):
@@ -643,6 +800,8 @@ class KeyboardHook:
         self._last_hwnd: int | None = None
         self._cached_layout = LANG_ENGLISH
         self._cached_layout_time = 0.0
+        self._word_layout: int | None = None
+        self._shortcut_modifiers_down: set[str] = set()
 
     def install(self, hinst: int) -> bool:
         self._callback = HOOKPROC(self._hook_proc)
@@ -662,6 +821,7 @@ class KeyboardHook:
     def clear_typed_scans(self) -> None:
         """Discard the partial word when the caret moves outside this hook."""
         self._typed_scans.clear()
+        self._word_layout = None
 
     def _enqueue_auto(
         self,
@@ -711,6 +871,12 @@ class KeyboardHook:
         if flags & LLKHF_INJECTED:
             return _call_next_hook(self._hook, nCode, wParam, lParam)
 
+        modifier_family = _shortcut_modifier_family(vk)
+        if is_down and modifier_family:
+            self._shortcut_modifiers_down.add(modifier_family)
+        elif is_up and modifier_family:
+            self._shortcut_modifiers_down.discard(modifier_family)
+
         # Key UP handling
         if (
             is_up
@@ -745,7 +911,8 @@ class KeyboardHook:
         # Window change detection
         if self._foreground_changed():
             self._typed_scans.clear()
-            self.worker._pending_corrections.clear()
+            self._word_layout = None
+            self.worker.clear_pending()
             self.worker.clear_autocorrect_undo()
             self.phrase_buffer.clear()
             self.caret_guard.on_focus_change()
@@ -766,10 +933,13 @@ class KeyboardHook:
             return _call_next_hook(self._hook, nCode, wParam, lParam)
 
         # Other modifiers down (Ctrl/Alt/Win) - hotkey, don't process
-        if any_modifier_down():
+        if self._shortcut_modifiers_down:
+            is_layout_switch_hotkey = vk == VK_SPACE and "win" in self._shortcut_modifiers_down
             self._typed_scans.clear()
+            self._word_layout = None
             self.phrase_buffer.clear()
-            self.worker._pending_corrections.clear()
+            if not is_layout_switch_hotkey:
+                self.worker.clear_pending()
             return _call_next_hook(self._hook, nCode, wParam, lParam)
 
         if not self.enabled_flag.is_set():
@@ -779,15 +949,18 @@ class KeyboardHook:
         if vk == VK_BACK:
             if self._typed_scans:
                 self._typed_scans.pop()
-                self.phrase_buffer.backspace()
-                self.worker._pending_corrections.clear()
+            self.phrase_buffer.backspace()
+            self.worker.clear_pending()
+            if not self._typed_scans:
+                self._word_layout = None
             return _call_next_hook(self._hook, nCode, wParam, lParam)
 
         # Navigation keys - clear buffers, set caret guard
         if vk in NAV_CLEAR_VKS:
             self._typed_scans.clear()
+            self._word_layout = None
             self.phrase_buffer.clear()
-            self.worker._pending_corrections.clear()
+            self.worker.clear_pending()
             self.caret_guard.on_nav()
             return _call_next_hook(self._hook, nCode, wParam, lParam)
 
@@ -797,17 +970,26 @@ class KeyboardHook:
             suppress_separator = False
             if self.config.auto_correct_enabled and not suppressed:
                 scans = list(self._typed_scans)
-                layout = self.get_layout(True)
+                layout = self._word_layout or self.get_layout(True)
                 suppress_separator = bool(scans) and vk in (VK_RETURN, VK_TAB)
                 self._enqueue_auto(scans, layout, vk, False, suppress_separator)
-            self.phrase_buffer.add_sep(vk)
+            # Enter can submit a message.  Never keep it in the manual
+            # conversion buffer: replaying a stale phrase would replay Enter
+            # and could send the preceding message again.
+            if vk == VK_RETURN:
+                self.phrase_buffer.clear()
+            else:
+                self.phrase_buffer.add_sep(vk)
             self._typed_scans.clear()
+            self._word_layout = None
             if suppress_separator:
                 return 1
             return _call_next_hook(self._hook, nCode, wParam, lParam)
 
         # Letter keys (by scan code)
         if sc in LETTER_SCANS:
+            if not self._typed_scans:
+                self._word_layout = self.get_layout(True)
             shifted = bool(user32.GetKeyState(VK_SHIFT) & 0x8000) ^ bool(
                 user32.GetKeyState(VK_CAPITAL) & 0x0001
             )
@@ -828,16 +1010,18 @@ class KeyboardHook:
             and not self.caret_guard.on_word_break()
         ):
             scans = list(self._typed_scans)
-            layout = self.get_layout(True)
+            layout = self._word_layout or self.get_layout(True)
             self._enqueue_auto(scans, layout, vk, term_shifted)
         else:
             self.caret_guard.on_word_break()
 
         self._typed_scans.clear()
+        self._word_layout = None
         if is_word_terminator(vk, term_shifted):
             self.phrase_buffer.add_sep(vk, term_shifted)
         else:
             self.phrase_buffer.clear()
+            self.worker.clear_pending()
         return _call_next_hook(self._hook, nCode, wParam, lParam)
 
     def _foreground_changed(self) -> bool:
@@ -901,6 +1085,6 @@ class MouseHook:
         self.worker.increment_seq()
         self.keyboard_hook.clear_typed_scans()
         self.phrase_buffer.clear()
-        self.worker._pending_corrections.clear()
+        self.worker.clear_pending()
         self.worker.clear_autocorrect_undo()
         self.caret_guard.on_nav()
